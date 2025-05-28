@@ -16,7 +16,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.12'
 
       - name: Create staging directories
         run: |
@@ -27,12 +27,12 @@ jobs:
       - name: Download kubectl
         run: |
           cd ${{ github.workspace }}
-          ./assets/download_scripts/download_kubectl.sh
+          ./assets/download_scripts/download_kubectl.sh "${{ github.workspace }}"
 
       - name: Download FZF suite
         run: |
           cd ${{ github.workspace }}
-          ./assets/download_scripts/download_fzf_suite.sh
+          ./assets/download_scripts/download_fzf_suite.sh "${{ github.workspace }}"
 
       - name: Build static tmux
         run: |
