@@ -17,13 +17,11 @@ class MenuItem:
         self,
         display_text: str,
         action_instance: Optional[Action] = None,
-        shortcut: Optional[str] = None,
         icon: Optional[str] = None,
         is_separator: bool = False,
     ):
         self.display_text = display_text
         self.action_instance = action_instance
-        self.shortcut = shortcut
         self.icon = icon
         self.is_separator = is_separator
 
@@ -88,7 +86,6 @@ class ActionListView(BaseUIView):
                     MenuItem(
                         action_instance.name,
                         action_instance=action_instance,
-                        shortcut=action_instance.shortcut,
                         icon=action_instance.icon,
                     )
                 )

@@ -21,11 +21,10 @@ class Action(ABC, Generic[R]):
     """
 
     def __init__(
-        self, app_services: AppServices, name: str, shortcut: str, icon: str, **kwargs: Any
+        self, app_services: AppServices, name: str, icon: str, **kwargs: Any
     ):
         self.app_services = app_services
         self.name = name
-        self.shortcut = shortcut
         self._icon = icon
 
     @property

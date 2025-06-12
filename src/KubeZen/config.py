@@ -63,10 +63,18 @@ class KubeZenConfig:
     kube_config_path: str = field(init=False)
 
     # Resource paths (resolved during initialization)
+    python_executable_path: Path = field(init=False)
+    kubectl_path: Path = field(init=False)
+    tmux_path: Path = field(init=False)
     fzf_path: Path = field(init=False)
+    fzf_tmux_script_path: Path = field(init=False)
+    core_ui_runner_script_path: Path = field(init=False)
     kubezen_tmux_config_path: Path = field(init=False)
+    mouse_swipe_plugin_script_path: Path = field(init=False)
     fzf_item_reader_script_path: Path = field(init=False)
     pvc_file_browser_script_path: Path = field(init=False)
+    less_path: Optional[Path] = field(init=False)
+    vim_path: Optional[Path] = field(init=False)
 
     # Configuration schema
     CONFIG_VALUES: ClassVar[Dict[str, ConfigValue]] = {
@@ -214,6 +222,7 @@ class KubeZenConfig:
                     f"AppConfig INFO: Optional resource '{name}' not found. Will be unavailable.",
                     file=sys.stderr,
                 )
+                setattr(self, f"{name}_path", None)
 
     def _set_derived_paths(self) -> None:
         """Sets configuration values that are derived from other settings."""

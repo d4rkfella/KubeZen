@@ -10,7 +10,7 @@ from KubeZen.core.signals import NavigationSignal, StaySignal
 from KubeZen.core.exceptions import (
     ActionFailedError,
 )
-from KubeZen.actions.pod.pod_action_utils import select_container_if_needed
+from KubeZen.actions.action_utils import select_container_if_needed
 
 
 class ExecIntoPodAction(Action):
