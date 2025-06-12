@@ -17,6 +17,7 @@ from typing import (
     Coroutine,
     Set,
     Union,
+    cast,
 )
 
 from KubeZen.core.service_base import ServiceBase
@@ -396,7 +397,7 @@ class TmuxUIManager(ServiceBase):
         window_name: str = "KubeZen Task Window",
         task_name: Optional[str] = None,
         attach: bool = True,
-        set_remain_on_exit: bool = True,
+        set_remain_on_exit: bool = False,
         wait_for_completion: bool = False,
     ) -> Optional[Dict[str, str]]:
         if not self.session:
@@ -405,96 +406,58 @@ class TmuxUIManager(ServiceBase):
         final_command = shlex.join(command_str) if isinstance(command_str, list) else command_str
         stderr_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
         
-        # The command is wrapped to ensure stderr is captured and it runs in a proper shell environment
         command_to_run = f"{{ {final_command}; }} 2> {stderr_file.name}"
         
         new_window = None
         try:
-            # Create window with remain-on-exit ON to prevent race condition
             new_window = await asyncio.to_thread(
                 self.session.new_window,
                 window_name=window_name,
                 attach=attach,
                 window_shell=command_to_run,
             )
+            if set_remain_on_exit:
+                await asyncio.to_thread(new_window.set_window_option, "remain-on-exit", "on")
             
-            # Check for instant failure by reading the stderr file
+            await asyncio.sleep(0.5)
+
             stderr_file.close()
             with open(stderr_file.name, "r") as f:
                 error_output = f.read().strip()
-
             if error_output:
-                # If there's an immediate error, raise an exception.
                 raise TmuxOperationError(f"{error_output}")
             
-            # If we are here, a window was created without immediate error.
             if new_window.id:
                 self.kubezen_window_ids.add(new_window.id)
             
-            # Retry mechanism to find the pane, making it more robust.
-            pane = None
-            for _ in range(5): # Retry up to 5 times (1 second total)
-                pane = await asyncio.to_thread(getattr, new_window, 'attached_pane', None)
-                if pane:
-                    break
-                await asyncio.sleep(0.2)
-
+            pane = await self._get_pane_with_retry(new_window, window_name)
             if not pane:
                 raise TmuxOperationError(f"Could not find attached pane for new window '{window_name}'.")
 
-            if not set_remain_on_exit:
-                await asyncio.to_thread(new_window.set_window_option, "remain-on-exit", "off")
-
             if wait_for_completion:
-                # Wait for the pane to disappear as a signal of completion
-                while await asyncio.to_thread(pane.pane_exists):
-                    await asyncio.sleep(0.2)
-            
-            if new_window.id and pane and pane.id:
+                await self.wait_for_window_to_close(new_window.id)
+
+            if new_window and new_window.id and pane and pane.id:
                 return {"window_id": new_window.id, "pane_id": pane.id}
             
-            raise TmuxOperationError("Failed to get window or pane ID after creation.")
+            return None # Should not be reached if window creation is successful
 
         except Exception as e:
             self.logger.error(f"Error in launch_command_in_new_window: {e}", exc_info=True)
-            if new_window: # If window was created but something else failed, kill it
+            if new_window:
                 await self.kill_window_by_id(new_window.id)
-            # Re-raise the original exception to be handled by the decorator
             raise
         finally:
-            # Ensure the temp file is always cleaned up
             os.remove(stderr_file.name)
 
-    @tmux_error_handler()
-    async def display_text_in_new_window(
-        self,
-        text: str,
-        window_name: str,
-        pager_command: str = "less -R",
-        attach: bool = True,
-    ) -> bool:
-        """
-        Displays text in a new window with a pager and waits for it to close.
-        Returns True on success, False on failure.
-        """
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as tmp:
-            tmp.write(text)
-            tmp_path = tmp.name
-
-        # The command to execute in the new window
-        command_str = f"{pager_command} {shlex.quote(tmp_path)}"
-        # The command to run after the main command exits (for cleanup)
-        cleanup_command = f"rm {shlex.quote(tmp_path)}"
-
-        # We combine them so cleanup always runs. The `trap` ensures cleanup even on Ctrl+C in the pager.
-        full_shell_command = f"trap '{cleanup_command}' EXIT; {command_str}"
-
-        return await self.display_command_in_pager(
-            command_to_page=full_shell_command,
-            pager_command="",  # The pager is already in the command
-            task_name=window_name,
-            attach=attach,
-        )
+    async def _get_pane_with_retry(self, window: "libtmux.Window", window_name: str) -> Optional["libtmux.Pane"]:
+        """Retry mechanism to find the pane, making it more robust."""
+        for _ in range(5):  # Retry up to 5 times (1 second total)
+            pane = await asyncio.to_thread(getattr, window, 'attached_pane', None)
+            if pane:
+                return cast(libtmux.Pane, pane)
+            await asyncio.sleep(0.2)
+        return None
 
     @tmux_error_handler()
     async def wait_for_window_to_close(self, window_id: str, timeout: float = 3600.0) -> bool:
@@ -525,8 +488,6 @@ class TmuxUIManager(ServiceBase):
         """
         Displays the output of a command in a new window, piped through a pager.
         """
-        # If a pager command is provided, pipe the command_to_page into it.
-        # Otherwise, assume command_to_page is a self-contained command.
         if pager_command:
             full_command = f"{command_to_page} | {pager_command}"
         else:
@@ -537,7 +498,7 @@ class TmuxUIManager(ServiceBase):
                 command_str=full_command,
                 window_name=task_name,
                 attach=attach,
-                set_remain_on_exit=True,  # This is critical to prevent race conditions.
+                set_remain_on_exit=False,
             )
             return result is not None
         except Exception as e:
@@ -624,3 +585,34 @@ class TmuxUIManager(ServiceBase):
                 )
             else:
                 self.logger.error(f"Failed to display toast: {e}", exc_info=True)
+
+    @tmux_error_handler()
+    async def display_text_in_new_window(
+        self,
+        text: str,
+        window_name: str,
+        pager_command: str = "less -R",
+        attach: bool = True,
+    ) -> bool:
+        """
+        Displays text in a new window with a pager and waits for it to close.
+        Returns True on success, False on failure.
+        """
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as tmp:
+            tmp.write(text)
+            tmp_path = tmp.name
+
+        # The command to execute in the new window
+        command_str = f"{pager_command} {shlex.quote(tmp_path)}"
+        # The command to run after the main command exits (for cleanup)
+        cleanup_command = f"rm {shlex.quote(tmp_path)}"
+
+        # We combine them so cleanup always runs. The `trap` ensures cleanup even on Ctrl+C in the pager.
+        full_shell_command = f"trap '{cleanup_command}' EXIT; {command_str}"
+
+        return await self.display_command_in_pager(
+            command_to_page=full_shell_command,
+            pager_command="",  # The pager is already in the command
+            task_name=window_name,
+            attach=attach,
+        )

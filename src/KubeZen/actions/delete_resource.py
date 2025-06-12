@@ -12,8 +12,14 @@ from KubeZen.core.exceptions import (
     TmuxCommandInterruptedError,
     TmuxEnvironmentError,
 )
-from KubeZen.core.signals import PopViewSignal, NavigationSignal
+from KubeZen.core.signals import PopViewSignal, NavigationSignal, StaySignal
 from KubeZen.core.user_input_manager import InputSpec
+
+
+def validate_yes_no(input_str: str) -> None:
+    """Validator to ensure input is 'y' or 'n'."""
+    if input_str.lower().strip() not in ["y", "n"]:
+        raise ValueError("Please enter 'y' or 'n'.")
 
 
 class DeleteResourceAction(Action):
@@ -48,23 +54,21 @@ class DeleteResourceAction(Action):
             f"{action_name}: Initiating 'Delete' for {resource_kind} '{resource_name}' in namespace '{namespace_for_command}'"
         )
 
-        # Create a validator function
-        def validate_confirmation(input_str: str) -> None:
-            if input_str != resource_name:
-                raise ValueError(f"Input must match '{resource_name}'.")
-
         try:
-            prompt = f"To confirm deletion, please type the resource name '{resource_name}': "
+            prompt = f"Are you sure you want to delete {resource_kind} '{resource_name}'? (y/n): "
             spec = InputSpec(
                 result_key="confirmation",
                 prompt_message=prompt,
-                validator=validate_confirmation,
-                validation_error_message="Confirmation failed.",
+                validator=validate_yes_no,
+                validation_error_message="Please enter 'y' or 'n'.",
             )
             
-            await context.user_input_manager.get_multiple_inputs(
+            results = await context.user_input_manager.get_multiple_inputs(
                 specs=[spec], task_name="Confirm Deletion"
             )
+
+            if results.get("confirmation", "n").lower() != "y":
+                raise UserInputCancelledError("User did not confirm deletion.")
 
             context.logger.info("User confirmed deletion. Proceeding...")
 
@@ -97,7 +101,7 @@ class DeleteResourceAction(Action):
             await context.tmux_ui_manager.show_toast(
                 "Delete action cancelled.", duration=3
             )
-            return PopViewSignal()
+            return StaySignal()
         except Exception as e:
             context.logger.error(
                 f"{action_name}: Unexpected error during delete: {e}", exc_info=True
