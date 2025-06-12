@@ -26,11 +26,6 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
-#  Usually these files are written by a CI, but they may be committed by users
-#  accidentally.
-*.spec
-
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

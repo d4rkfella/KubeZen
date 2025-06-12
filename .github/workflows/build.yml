@@ -16,23 +16,21 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
 
       - name: Create staging directories
         run: |
-          mkdir -p ${{ github.workspace }}/bin
-          mkdir -p ${{ github.workspace }}/vim_static_build
-          mkdir -p ${{ github.workspace }}/assets/fzf_vim_plugin
+          mkdir -p bin
+          mkdir -p vim_static_build
+          mkdir -p assets/fzf_vim_plugin
 
       - name: Download kubectl
         run: |
-          cd ${{ github.workspace }}
-          ./assets/download_scripts/download_kubectl.sh "${{ github.workspace }}"
+          ./assets/download_scripts/download_kubectl.sh ./
 
       - name: Download FZF suite
         run: |
-          cd ${{ github.workspace }}
-          ./assets/download_scripts/download_fzf_suite.sh "${{ github.workspace }}"
+          ./assets/download_scripts/download_fzf_suite.sh ./
 
       - name: Build static tmux
         run: |
@@ -60,4 +58,4 @@ jobs:
         with:
           name: kubezen
           path: ${{ github.workspace }}/dist/kubezen/
-          if-no-files-found: error 
+          if-no-files-found: error
