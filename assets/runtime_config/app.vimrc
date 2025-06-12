@@ -1,3 +1,5 @@
+set nocompatible " Enable Vim's modern features; MUST be the first line
+
 " Get plugin directories from environment variables set by KubeZen
 let s:fzf_base_dir_env    = $KUBEZEN_FZF_BASE_PLUGIN_DIR
 let s:fzf_plugin_dir_env  = $KUBEZEN_FZF_VIM_COMMANDS_PLUGIN_DIR
@@ -59,15 +61,24 @@ else
   echom "Warning: KubeZen fzf binary directory is empty or not a directory: " . s:fzf_bin_dir
 endif
 
-" Debugging
-echom "KubeZen app.vimrc loaded."
-echom "Using fzf binary dir (for PATH): " . s:fzf_bin_dir
-echom "g:fzf_exec: " . (exists('g:fzf_exec') ? g:fzf_exec : "not set")
-echom "Using fzf commands plugin path: " . s:fzf_plugin_dir
-echom "Using fzf base plugin path: " . s:fzf_base_dir
-echom "Runtimepath: " . &runtimepath
+let g:fzf_blines_options = '--bind "f2:abort"'
 
-autocmd VimEnter * echom "fzf#run available: " . exists('*fzf#run')
+" Keybinding: Use F2 to open the :BLines search.
+" It will automatically pick up the options defined above.
+nnoremap <F2> :BLines<CR>
 
-" Keybinding
-nnoremap <leader>f :Files<CR>
+" --- Quality of Life Mappings ---
+
+" Save and Exit with Ctrl+S in normal and insert mode
+nnoremap <C-s> :wq<CR>
+inoremap <C-s> <C-o>:wq<CR>
+
+" Quit with <leader>q (e.g., \q)
+nnoremap <leader>q :q<CR>
+
+" Force Quit with <leader>Q (e.g., \Q)
+nnoremap <leader>Q :q!<CR>
+
+" Exit without saving (force quit) with Ctrl+X
+nnoremap <C-x> :q!<CR>
+inoremap <C-x> <C-o>:q!<CR>

@@ -128,6 +128,9 @@ class TmuxUIManager(ServiceBase):
         )
 
         self.kubezen_window_ids: Set[str] = set()  # Track all KubeZen-created window IDs
+        self._cleanup_callbacks: Dict[str, list[Callable[[], Coroutine[Any, Any, None]]]] = {}
+        self._window_monitor_task: Optional[asyncio.Task] = None
+        self._WINDOW_MONITOR_INTERVAL = 2  # seconds
 
     @tmux_error_handler()
     async def initialize_environment(self) -> bool:
@@ -150,6 +153,7 @@ class TmuxUIManager(ServiceBase):
         self.logger.debug(
             f"Successfully initialized tmux environment. Session: '{self.session.name}', Main Window: '{self.main_window.name}'"
         )
+        self._window_monitor_task = asyncio.create_task(self.monitor_closed_windows())
         return True
 
     def _find_pane_by_id(self, pane_id: str) -> Optional[libtmux.Pane]:
@@ -210,6 +214,14 @@ class TmuxUIManager(ServiceBase):
             f"Shutting down UI: killing all {len(self.kubezen_window_ids)} tracked windows."
         )
 
+        if self._window_monitor_task:
+            self.logger.info("Cancelling window monitor task.")
+            self._window_monitor_task.cancel()
+            try:
+                await self._window_monitor_task
+            except asyncio.CancelledError:
+                pass  # Expected cancellation
+
         # Create a copy of the set to iterate over, as kill_window_by_id modifies the original set.
         window_ids_to_kill = list(self.kubezen_window_ids)
 
@@ -222,6 +234,45 @@ class TmuxUIManager(ServiceBase):
                 self.logger.error(f"Error during shutdown of window ID '{window_id}': {result}")
 
         self.logger.info("UI shutdown sequence completed.")
+
+    async def monitor_closed_windows(self) -> None:
+        """
+        Runs in the background, periodically checking for closed windows and
+        executing any registered cleanup callbacks.
+        """
+        self.logger.info("Starting window monitor task.")
+        while True:
+            try:
+                # Check for closed windows
+                closed_window_ids = []
+                # Iterate over a copy as the set will be modified
+                for window_id in list(self.kubezen_window_ids):
+                    if not self._does_window_exist(window_id):
+                        self.logger.info(f"Detected closed window: {window_id}")
+                        closed_window_ids.append(window_id)
+
+                # Run cleanup callbacks for closed windows
+                for window_id in closed_window_ids:
+                    if window_id in self._cleanup_callbacks:
+                        self.logger.info(
+                            f"Running {len(self._cleanup_callbacks[window_id])} cleanup callbacks for window {window_id}."
+                        )
+                        callbacks = self._cleanup_callbacks.pop(window_id)
+                        await asyncio.gather(
+                            *(cb() for cb in callbacks), return_exceptions=True
+                        )
+
+                    # Remove from the main tracked set
+                    self.kubezen_window_ids.discard(window_id)
+
+                await asyncio.sleep(self._WINDOW_MONITOR_INTERVAL)
+            except asyncio.CancelledError:
+                self.logger.info("Window monitor task cancelled.")
+                break
+            except Exception as e:
+                self.logger.error(f"Error in window monitor task: {e}", exc_info=True)
+                # Avoid tight loop on unexpected errors
+                await asyncio.sleep(5)
 
     def _get_or_create_input_pane(self) -> Optional[libtmux.Pane]:
         """Finds or creates a dedicated tmux pane for user input."""
@@ -400,63 +451,53 @@ class TmuxUIManager(ServiceBase):
         set_remain_on_exit: bool = False,
         wait_for_completion: bool = False,
     ) -> Optional[Dict[str, str]]:
+        """Creates a new tmux window and runs a command in it."""
         if not self.session:
-            raise TmuxOperationError("Tmux session not initialized.")
+            raise TmuxEnvironmentError("Cannot launch command: session not initialized.")
 
-        final_command = shlex.join(command_str) if isinstance(command_str, list) else command_str
-        stderr_file = tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8')
-        
-        command_to_run = f"{{ {final_command}; }} 2> {stderr_file.name}"
-        
-        new_window = None
+        self.logger.debug(
+            f"Launching command in new window '{window_name}'. Attach: {attach}, Remain-on-exit: {set_remain_on_exit}"
+        )
+
         try:
+            # Using window_shell is more robust for commands that should own the pane.
+            # It ensures the window closes when the command exits (if remain-on-exit is off).
             new_window = await asyncio.to_thread(
                 self.session.new_window,
                 window_name=window_name,
                 attach=attach,
-                window_shell=command_to_run,
+                window_shell=command_str,
             )
+
             if set_remain_on_exit:
                 await asyncio.to_thread(new_window.set_window_option, "remain-on-exit", "on")
-            
-            await asyncio.sleep(0.5)
 
-            stderr_file.close()
-            with open(stderr_file.name, "r") as f:
-                error_output = f.read().strip()
-            if error_output:
-                raise TmuxOperationError(f"{error_output}")
-            
-            if new_window.id:
-                self.kubezen_window_ids.add(new_window.id)
-            
             pane = await self._get_pane_with_retry(new_window, window_name)
             if not pane:
                 raise TmuxOperationError(f"Could not find attached pane for new window '{window_name}'.")
 
+            self.kubezen_window_ids.add(new_window.id)
+            self.logger.debug(
+                f"Successfully launched command in window '{new_window.name}' (ID: {new_window.id}, Pane: {pane.id})."
+            )
+
             if wait_for_completion:
                 await self.wait_for_window_to_close(new_window.id)
 
-            if new_window and new_window.id and pane and pane.id:
-                return {"window_id": new_window.id, "pane_id": pane.id}
-            
-            return None # Should not be reached if window creation is successful
-
+            return {"window_id": new_window.id, "pane_id": pane.id}
         except Exception as e:
             self.logger.error(f"Error in launch_command_in_new_window: {e}", exc_info=True)
-            if new_window:
-                await self.kill_window_by_id(new_window.id)
             raise
-        finally:
-            os.remove(stderr_file.name)
 
-    async def _get_pane_with_retry(self, window: "libtmux.Window", window_name: str) -> Optional["libtmux.Pane"]:
+    async def _get_pane_with_retry(
+        self, window: "libtmux.Window", window_name: str, retries=5, delay=0.1
+    ) -> Optional["libtmux.Pane"]:
         """Retry mechanism to find the pane, making it more robust."""
-        for _ in range(5):  # Retry up to 5 times (1 second total)
+        for _ in range(retries):
             pane = await asyncio.to_thread(getattr, window, 'attached_pane', None)
             if pane:
                 return cast(libtmux.Pane, pane)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(delay)
         return None
 
     @tmux_error_handler()
@@ -487,18 +528,16 @@ class TmuxUIManager(ServiceBase):
     ) -> bool:
         """
         Displays the output of a command in a new window, piped through a pager.
+        This is a simple, fire-and-forget pager.
         """
-        if pager_command:
-            full_command = f"{command_to_page} | {pager_command}"
-        else:
-            full_command = command_to_page
-
+        full_command = f"{command_to_page} | {pager_command}"
         try:
+            # Use launch_command_in_new_window, which should handle window creation
+            # and closing gracefully. set_remain_on_exit=False is the default and correct.
             result = await self.launch_command_in_new_window(
                 command_str=full_command,
                 window_name=task_name,
                 attach=attach,
-                set_remain_on_exit=False,
             )
             return result is not None
         except Exception as e:
@@ -506,18 +545,134 @@ class TmuxUIManager(ServiceBase):
             return False
 
     @tmux_error_handler()
+    async def display_logs_in_pager(
+        self,
+        pager_command: str,
+        task_name: str,
+        attach: bool = True,
+        key_bindings: Optional[Dict[str, str]] = None,
+        on_close_callbacks: Optional[list[Callable[[], Coroutine[Any, Any, None]]]] = None,
+    ) -> bool:
+        """
+        Displays logs from a file in a new tmux window with a pager.
+        This is a specialized method that handles key bindings for interactivity.
+        """
+        if not self.session:
+            self.logger.error("Cannot display logs in pager: Tmux session not initialized.")
+            return False
+
+        window_name = task_name[:30]  # Truncate for tmux status bar
+
+        # Launch the pager command in a new window but don't wait for completion here.
+        window_info = await self.launch_command_in_new_window(
+            command_str=pager_command,
+            window_name=window_name,
+            task_name=task_name,
+            attach=attach,
+            set_remain_on_exit=False,  # Let the window close when pager exits
+            wait_for_completion=False, # We will wait manually below
+        )
+
+        if not window_info or "pane_id" not in window_info or "window_id" not in window_info:
+            self.logger.error("Failed to create a new window for the pager.")
+            return False
+
+        pane_id = window_info["pane_id"]
+        window_id = window_info["window_id"]
+
+        # Apply custom key bindings to the new pane if they exist.
+        if key_bindings:
+            # IMPORTANT: Replace placeholder for the pane_id in the commands
+            final_bindings = {
+                key: cmd.replace("%TMUX_PANE%", pane_id)
+                for key, cmd in key_bindings.items()
+            }
+            await self.set_window_key_bindings(pane_id, final_bindings)
+
+        if on_close_callbacks:
+            self.logger.debug(
+                f"Registering {len(on_close_callbacks)} on_close callbacks for window {window_id}"
+            )
+            self._cleanup_callbacks[window_id] = on_close_callbacks
+        
+        return True
+
+    @tmux_error_handler()
+    async def unbind_keys(self, keys: list[str]) -> None:
+        """Unbinds a list of keys from the global (no-prefix) key table."""
+        if not self.session:
+            self.logger.error("Cannot unbind keys: Tmux session not initialized.")
+            return
+
+        for key in keys:
+            try:
+                self.logger.info(f"Unbinding key '{key}'")
+                await asyncio.to_thread(self.server.cmd, "unbind-key", "-n", key)
+            except Exception as e:
+                # This is not critical, so we log a warning instead of an error.
+                self.logger.warning(f"Could not unbind key '{key}': {e}", exc_info=False)
+
+    @tmux_error_handler()
+    async def set_window_key_bindings(
+        self, pane_id: str, key_bindings: Dict[str, str]
+    ) -> None:
+        """
+        Binds keys to commands. The binding is conditional: it only fires if the
+        active pane matches the one it was created for. Otherwise, the keypress
+        is passed through to the application (e.g., Vim).
+        """
+        if not self.session:
+            self.logger.error("Cannot set key bindings: Tmux session not initialized.")
+            return
+
+        self.logger.debug(f"Setting conditional key bindings for pane {pane_id}: {key_bindings}")
+
+        for key, command in key_bindings.items():
+            try:
+                # The command will only run if the active pane is the one we are targeting.
+                # If not, the key press is ignored by this binding and handled by the application.
+                condition = f'[ "#{{pane_id}}" = "{pane_id}" ]'
+                if_command = f'run-shell "{command}"'
+                
+                self.logger.info(f"Binding key '{key}' to conditional command for pane {pane_id}")
+
+                await asyncio.to_thread(
+                    self.server.cmd,
+                    "bind-key",
+                    "-n",       # -n: no prefix key required
+                    key,
+                    "if-shell",
+                    condition,
+                    if_command,
+                )
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to bind key '{key}' for pane {pane_id}: {e}",
+                    exc_info=True,
+                )
+        self.logger.debug(f"Finished setting key bindings for pane {pane_id}.")
+
+    @tmux_error_handler()
     async def launch_editor(self, file_path: str, task_name: str = "KubeZen Editor") -> bool:
         """
         Launches the user's editor in a new, attached window to edit a file.
-        Waits for the editor process to complete using a polling mechanism.
-        Returns True if the editor exits successfully, False otherwise.
+        It prioritizes using vim with the custom config if available.
         """
         if not self.server:
             self.logger.error("Cannot launch editor: Tmux server not initialized.")
             return False
 
-        editor = os.environ.get("EDITOR", "vi")
-        command_str = f"{editor} {shlex.quote(file_path)}"
+        # Prioritize using vim with our custom config if available
+        if self.config.vim_path and self.config.vim_config_path:
+            command_str = (
+                f"{shlex.quote(str(self.config.vim_path))} "
+                f"-u {shlex.quote(str(self.config.vim_config_path))} "
+                f"{shlex.quote(file_path)}"
+            )
+        else:
+            editor = os.environ.get("EDITOR", "vi")
+            command_str = f"{editor} {shlex.quote(file_path)}"
+
         self.logger.info(f"Launching editor: {command_str}")
 
         try:
@@ -594,25 +749,29 @@ class TmuxUIManager(ServiceBase):
         pager_command: str = "less -R",
         attach: bool = True,
     ) -> bool:
-        """
-        Displays text in a new window with a pager and waits for it to close.
-        Returns True on success, False on failure.
-        """
-        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as tmp:
-            tmp.write(text)
-            tmp_path = tmp.name
+        """Displays a string of text in a new window with a pager."""
+        try:
+            # Create a temporary file to hold the text
+            with tempfile.NamedTemporaryFile(
+                mode="w", delete=False, encoding="utf-8", suffix=".txt"
+            ) as tmp_file:
+                tmp_file.write(text)
+                tmp_file_path = tmp_file.name
 
-        # The command to execute in the new window
-        command_str = f"{pager_command} {shlex.quote(tmp_path)}"
-        # The command to run after the main command exits (for cleanup)
-        cleanup_command = f"rm {shlex.quote(tmp_path)}"
+            # The command to run in the new window is the pager opening the file.
+            # We add a trap to ensure the temp file is cleaned up when the shell exits.
+            command_to_run = (
+                f"trap 'rm -f {shlex.quote(tmp_file_path)}' EXIT; "
+                f"{pager_command} {shlex.quote(tmp_file_path)}"
+            )
 
-        # We combine them so cleanup always runs. The `trap` ensures cleanup even on Ctrl+C in the pager.
-        full_shell_command = f"trap '{cleanup_command}' EXIT; {command_str}"
-
-        return await self.display_command_in_pager(
-            command_to_page=full_shell_command,
-            pager_command="",  # The pager is already in the command
-            task_name=window_name,
-            attach=attach,
-        )
+            await self.launch_command_in_new_window(
+                command_str=command_to_run,
+                window_name=window_name,
+                attach=attach,
+                set_remain_on_exit=False,  # Window should close when less exits
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"Error in display_text_in_new_window: {e}", exc_info=True)
+            return False

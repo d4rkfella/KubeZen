@@ -108,14 +108,11 @@ class KubernetesClient(
                 temp_dir = Path(tempfile.gettempdir()) / "kubezen_k8s_certs"
                 temp_dir.mkdir(parents=True, exist_ok=True)
 
-            # Set environment variables to control where temp files are created
-            os.environ["KUBERNETES_TEMP_DIR"] = str(temp_dir)
-            os.environ["TMPDIR"] = str(
-                temp_dir
-            )  # This affects where tempfile.mkstemp creates files
-            os.environ["TEMP"] = str(temp_dir)  # Windows compatibility
-            os.environ["TMP"] = str(temp_dir)  # Windows compatibility
-
+            # The 'kubernetes-client' library uses a global variable for temp file creation,
+            # which can be set on the 'Configuration' object. This is much safer than
+            # modifying global environment variables.
+            
+            # Load the configuration first
             await config.load_kube_config(
                 config_file=kube_config_file_to_use,
                 client_configuration=None,
@@ -123,7 +120,10 @@ class KubernetesClient(
                 **context_kwarg,
             )
 
+            # Get the loaded configuration and set the temp folder path on it
             loaded_config = client.Configuration.get_default_copy()
+            loaded_config.temp_folder_path = str(temp_dir)
+
             effective_host = loaded_config.host
             if self.logger:
                 self.logger.info(

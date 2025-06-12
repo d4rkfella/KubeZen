@@ -3,6 +3,9 @@ from typing import Optional, Dict, Any
 import shlex
 import asyncio
 import re
+import tempfile
+import os
+from pathlib import Path
 
 from KubeZen.core.actions import Action
 from KubeZen.core.contexts import ActionContext
@@ -204,17 +207,93 @@ class ViewLogsAction(Action):
 
             final_log_command = " ".join(shlex.quote(part) for part in final_command_parts)
 
-            pager_command = "less -R +F" if should_follow else "less -R"
-            asyncio.create_task(
-                context.tmux_ui_manager.display_command_in_pager(
-                    command_to_page=final_log_command,
-                    pager_command=pager_command,
-                    task_name=f"ViewLogs_{log_target_name}",
+            # --- Create a temporary file for logs to enable fzf searching ---
+            # The pager will read from this file. If following, a background
+            # process will continuously write to it.
+            with tempfile.NamedTemporaryFile(mode="w+", delete=False) as temp_file:
+                log_file_path = temp_file.name
+
+            # Start a background task to stream kubectl logs into the temp file
+            log_process = await asyncio.create_subprocess_shell(
+                final_log_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            async def stream_to_file(stream, file):
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    file.write(line.decode())
+                    file.flush()
+
+            log_file_handle = open(log_file_path, "a")
+            
+            # Start streaming tasks
+            stdout_task = asyncio.create_task(stream_to_file(log_process.stdout, log_file_handle))
+            stderr_task = asyncio.create_task(stream_to_file(log_process.stderr, log_file_handle))
+
+            # Brief delay to allow the first few log lines to be written to the file
+            # This prevents the pager from opening an empty file initially.
+            await asyncio.sleep(0.5)
+
+            # --- Set up pager and fzf key bindings ---
+            pager_command = f"less -j.5 -R -N {'+F' if should_follow else ''} {shlex.quote(log_file_path)}"
+
+            key_bindings = None
+            fzf_log_search_script = self.app_services.config.fzf_log_search_script_path
+            if fzf_log_search_script:
+                debug_log_path = "/tmp/fzf_search_errors.log"
+                # Construct the command with a placeholder for the pane ID.
+                # The UI manager will replace %TMUX_PANE% with the real ID.
+                command = f"{shlex.quote(str(fzf_log_search_script))} {shlex.quote(log_file_path)} %TMUX_PANE% 2> {shlex.quote(debug_log_path)}"
+                key_bindings = {"f2": command}
+            else:
+                context.logger.warning(
+                    "fzf-log-search script not found, F2 binding will be disabled."
                 )
+
+            # Define the cleanup coroutine for file resources
+            async def _cleanup_resources():
+                context.logger.info(f"Cleaning up resources for log view of '{log_target_name}'")
+                if log_process.returncode is None:
+                    try:
+                        log_process.terminate()
+                        await log_process.wait()  # ensure it's terminated
+                    except ProcessLookupError:
+                        pass  # Process already finished
+
+                # Wait for streaming tasks to finish processing any remaining output
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+
+                log_file_handle.close()
+
+                try:
+                    os.remove(log_file_path)
+                except OSError as e:
+                    context.logger.error(f"Error removing temp log file {log_file_path}: {e}")
+
+            # Define the key unbinding coroutine
+            async def _unbind_keys():
+                if key_bindings:
+                    context.logger.info("Unbinding keys for closed log viewer.")
+                    await context.tmux_ui_manager.unbind_keys(list(key_bindings.keys()))
+            
+            # Non-blocking call to display logs
+            await context.tmux_ui_manager.display_logs_in_pager(
+                pager_command=pager_command,
+                task_name=f"Logs: {log_target_name}",
+                key_bindings=key_bindings,
+                on_close_callbacks=[_cleanup_resources, _unbind_keys],
             )
 
         except (UserInputCancelledError, UserInputFailedError) as e:
-            await context.tmux_ui_manager.show_toast(f"Log view cancelled: {e}", bg_color="blue")
-            return StaySignal()
+            await context.tmux_ui_manager.show_toast(str(e), bg_color="blue")
+        except ActionFailedError as e:
+            context.logger.error(f"Action failed: {e}", exc_info=True)
+            await context.tmux_ui_manager.show_toast(
+                f"Error viewing logs: {e}", bg_color="red", duration=8
+            )
 
         return StaySignal()

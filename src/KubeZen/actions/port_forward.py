@@ -148,13 +148,12 @@ class PortForwardAction(Action):
                 command_str=port_forward_command,
                 window_name=task_name,
                 attach=True,
-                wait_for_completion=True,
+                wait_for_completion=False,
             )
             await context.tmux_ui_manager.show_toast(
                 f"Port-forwarding started for {resource_name} on local port {local_port}"
             )
         except Exception as e:
-            # The error message from TmuxOperationError will contain the specific kubectl error
             context.logger.error(f"Port-forward failed with exception: {e}", exc_info=True)
             await context.tmux_ui_manager.show_toast(
                 message=str(e),

@@ -68,6 +68,10 @@ class KubeZenConfig:
     tmux_path: Path = field(init=False)
     fzf_path: Path = field(init=False)
     fzf_tmux_script_path: Path = field(init=False)
+    fzf_log_search_script_path: Path = field(init=False)
+    fzf_base_plugin_path: Path = field(init=False)
+    fzf_vim_plugin_path: Path = field(init=False)
+    vim_config_path: Optional[Path] = field(init=False)
     core_ui_runner_script_path: Path = field(init=False)
     kubezen_tmux_config_path: Path = field(init=False)
     mouse_swipe_plugin_script_path: Path = field(init=False)
@@ -102,7 +106,11 @@ class KubeZenConfig:
         "tmux": Resource("tmux", is_executable=True),
         "less": Resource("less", is_executable=True, is_optional=True),
         "vim": Resource("vim", is_executable=True, is_optional=True),
+        "vim_config": Resource("assets/runtime_config/app.vimrc", is_optional=True),
+        "fzf_base_plugin": Resource("assets/fzf_base_plugin", is_directory=True),
+        "fzf_vim_plugin": Resource("assets/fzf_vim_plugin", is_directory=True),
         "fzf_tmux_script": Resource("bin/fzf-tmux", is_executable=True),
+        "fzf_log_search_script": Resource("bin/fzf_log_search.sh", is_executable=True),
         "core_ui_runner_script": Resource("src/KubeZen/core_ui_runner.py"),
         "kubezen_tmux_config": Resource("assets/tmux/kubezen.tmux.conf"),
         "mouse_swipe_plugin_script": Resource(
@@ -228,6 +236,14 @@ class KubeZenConfig:
         """Sets configuration values that are derived from other settings."""
         self.tmux_socket_path = self.session_temp_dir / f"{self.kubezen_socket_name}.sock"
         self.current_kube_context_name = self.kubezen_initial_context
+
+        # Set environment variables for vimrc
+        if self.fzf_base_plugin_path:
+            os.environ["KUBEZEN_FZF_BASE_PLUGIN_DIR"] = str(self.fzf_base_plugin_path)
+        if self.fzf_vim_plugin_path:
+            os.environ["KUBEZEN_FZF_VIM_COMMANDS_PLUGIN_DIR"] = str(self.fzf_vim_plugin_path)
+        if self.fzf_path:
+            os.environ["KUBEZEN_FZF_VIM_COMMANDS_BIN_DIR"] = str(self.fzf_path.parent)
 
         # Handle kube config path
         if self.kube_config_path_override:
