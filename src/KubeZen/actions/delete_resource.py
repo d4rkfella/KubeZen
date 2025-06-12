@@ -49,7 +49,7 @@ class DeleteResourceAction(Action):
         )
 
         # Create a validator function
-        def validate_confirmation(input_str: str):
+        def validate_confirmation(input_str: str) -> None:
             if input_str != resource_name:
                 raise ValueError(f"Input must match '{resource_name}'.")
 
@@ -97,7 +97,7 @@ class DeleteResourceAction(Action):
             await context.tmux_ui_manager.show_toast(
                 "Delete action cancelled.", duration=3
             )
-            return
+            return PopViewSignal()
         except Exception as e:
             context.logger.error(
                 f"{action_name}: Unexpected error during delete: {e}", exc_info=True

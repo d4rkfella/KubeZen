@@ -11,7 +11,7 @@ from KubeZen.core.user_input_manager import InputSpec
 from KubeZen.ui.views.port_forward_view import PortForwardView
 
 
-def validate_port(port_str: str):
+def validate_port(port_str: str) -> None:
     """Validator to ensure input is a valid port number."""
     if not port_str.isdigit():
         raise ValueError("Port must be a number.")
@@ -36,6 +36,9 @@ class PortForwardAction(Action):
         self, context: ActionContext, resource: Dict[str, Any]
     ) -> Optional[NavigationSignal]:
         action_name = self.__class__.__name__
+        if not resource:
+            raise ActionFailedError(f"{action_name}: Resource object is missing.")
+
         metadata = resource.get("metadata", {})
         if not metadata:
             raise ActionFailedError(f"{action_name}: Resource metadata is missing.")
@@ -49,12 +52,16 @@ class PortForwardAction(Action):
                 f"{action_name}: Resource name, namespace or kind is missing."
             )
 
-        remote_port = context.custom_data.get("selected_remote_port")
+        remote_port = None
+        if context.custom_data:
+            remote_port = context.custom_data.get("selected_remote_port")
         local_port = None
 
         if not remote_port:
             remote_ports = self._get_remote_ports(resource)
             if remote_ports:
+                if context.custom_data is None:
+                    context.custom_data = {}
                 context.custom_data["provider"] = lambda _: [
                     {
                         "metadata": {"name": str(port)},

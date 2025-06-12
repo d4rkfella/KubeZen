@@ -11,13 +11,14 @@ from KubeZen.core.exceptions import (
     ActionFailedError,
     UserInputCancelledError,
     UserInputFailedError,
+    TmuxOperationError,
 )
 
 if TYPE_CHECKING:
     from KubeZen.core.app_services import AppServices
 
 
-def validate_yes_no(input_str: str):
+def validate_yes_no(input_str: str) -> None:
     """Validator to ensure input is 'y' or 'n'."""
     if input_str.lower().strip() not in ["y", "n", "yes", "no"]:
         raise ValueError("Please enter 'y' or 'n'.")
@@ -56,27 +57,31 @@ class EditResourceAction(Action):
                 if not await context.tmux_ui_manager.launch_editor(file_path):
                     raise UserInputCancelledError("Editor was closed or failed to launch.")
 
-                with open(file_path, "r") as f:
-                    edited_content = f.read()
-
-                if edited_content.strip() == initial_yaml.strip():
-                    await context.tmux_ui_manager.show_toast(
-                        "No changes detected.", duration=3
-                    )
-                    break
-
+                # The edited content is now in file_path. We can use it directly.
                 try:
-                    # Validate YAML syntax before proceeding
-                    yaml.safe_load(edited_content)
-                    await context.kubernetes_client.apply_from_file_content(
-                        yaml_content=edited_content, namespace=namespace
+                    command = ["kubectl", "apply", "-f", file_path]
+                    result = await context.tmux_ui_manager.launch_command_in_new_window(
+                        command_str=command,
+                        window_name=f"apply-{resource_name}",
+                        attach=False,
+                        wait_for_completion=True,
                     )
-                    await context.tmux_ui_manager.show_toast(
-                        f"Successfully applied changes to {resource_name}.",
-                        bg_color="green",
-                    )
-                    break  # Exit loop on success
-                except (yaml.YAMLError, ActionFailedError) as e:
+
+                    output = result.get("output", "") if result else ""
+                    
+                    # Check for success keywords in kubectl output.
+                    if "unchanged" in output or "configured" in output or "created" in output:
+                        await context.tmux_ui_manager.show_toast(
+                            f"Successfully applied changes to {resource_name}.",
+                            bg_color="green",
+                        )
+                        break # Exit loop on success
+                    else:
+                        # If no success keyword, assume failure and show output.
+                        error_message = output.strip().split("\n")[-1] # Get last line of error
+                        raise ActionFailedError(error_message)
+
+                except (ActionFailedError, TmuxOperationError) as e:
                     await context.tmux_ui_manager.show_toast(
                         f"Error applying changes: {e}", bg_color="red", duration=8
                     )

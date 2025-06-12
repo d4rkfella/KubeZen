@@ -56,7 +56,7 @@ spec:
       type: "RuntimeDefault"
 """
 
-def validate_port(port_str: str):
+def validate_port(port_str: str) -> None:
     """Validator to ensure input is a valid port number."""
     if not port_str.isdigit():
         raise ValueError("Port must be a number.")
@@ -64,7 +64,7 @@ def validate_port(port_str: str):
     if not 1 <= port <= 65535:
         raise ValueError("Port must be between 1 and 65535.")
 
-def validate_user_id(uid_str: str):
+def validate_user_id(uid_str: str) -> None:
     """Validator to ensure input is a valid numeric user ID."""
     if not uid_str.isdigit():
         raise ValueError("User ID must be a number.")

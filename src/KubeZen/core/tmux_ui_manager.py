@@ -417,19 +417,30 @@ class TmuxUIManager(ServiceBase):
                 attach=attach,
                 window_shell=command_to_run,
             )
-            await asyncio.sleep(0.3) # Allow a moment for command to fail
-
-            # Check for instant failure
+            
+            # Check for instant failure by reading the stderr file
             stderr_file.close()
             with open(stderr_file.name, "r") as f:
                 error_output = f.read().strip()
 
             if error_output:
+                # If there's an immediate error, raise an exception.
                 raise TmuxOperationError(f"{error_output}")
             
-            # If we are here, the command launched without immediate error.
-            self.kubezen_window_ids.add(new_window.id)
-            pane = new_window.attached_pane
+            # If we are here, a window was created without immediate error.
+            if new_window.id:
+                self.kubezen_window_ids.add(new_window.id)
+            
+            # Retry mechanism to find the pane, making it more robust.
+            pane = None
+            for _ in range(5): # Retry up to 5 times (1 second total)
+                pane = await asyncio.to_thread(getattr, new_window, 'attached_pane', None)
+                if pane:
+                    break
+                await asyncio.sleep(0.2)
+
+            if not pane:
+                raise TmuxOperationError(f"Could not find attached pane for new window '{window_name}'.")
 
             if not set_remain_on_exit:
                 await asyncio.to_thread(new_window.set_window_option, "remain-on-exit", "off")
@@ -439,13 +450,19 @@ class TmuxUIManager(ServiceBase):
                 while await asyncio.to_thread(pane.pane_exists):
                     await asyncio.sleep(0.2)
             
-            return {"window_id": new_window.id, "pane_id": pane.id}
+            if new_window.id and pane and pane.id:
+                return {"window_id": new_window.id, "pane_id": pane.id}
+            
+            raise TmuxOperationError("Failed to get window or pane ID after creation.")
 
         except Exception as e:
+            self.logger.error(f"Error in launch_command_in_new_window: {e}", exc_info=True)
             if new_window: # If window was created but something else failed, kill it
                 await self.kill_window_by_id(new_window.id)
-            raise e # Re-raise the exception to be handled by the decorator
+            # Re-raise the original exception to be handled by the decorator
+            raise
         finally:
+            # Ensure the temp file is always cleaned up
             os.remove(stderr_file.name)
 
     @tmux_error_handler()
@@ -505,13 +522,22 @@ class TmuxUIManager(ServiceBase):
         task_name: str = "KubeZen Pager",
         attach: bool = True,
     ) -> bool:
-        full_command = f"{command_to_page} | {pager_command}"
+        """
+        Displays the output of a command in a new window, piped through a pager.
+        """
+        # If a pager command is provided, pipe the command_to_page into it.
+        # Otherwise, assume command_to_page is a self-contained command.
+        if pager_command:
+            full_command = f"{command_to_page} | {pager_command}"
+        else:
+            full_command = command_to_page
+
         try:
             result = await self.launch_command_in_new_window(
                 command_str=full_command,
                 window_name=task_name,
                 attach=attach,
-                set_remain_on_exit=False,
+                set_remain_on_exit=True,  # This is critical to prevent race conditions.
             )
             return result is not None
         except Exception as e:

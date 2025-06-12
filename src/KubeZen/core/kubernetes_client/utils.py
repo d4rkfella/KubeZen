@@ -260,6 +260,68 @@ class UtilsMixin:
                 "replace_namespaced_persistent_volume_claim",
             ),
         }
+        api_client, method_name = api_method_map.get(resource_type, (None, None))
+
+        if not api_client or not method_name:
+            if logger:
+                logger.error(
+                    f"[{log_prefix}] No client or method found for resource type '{resource_type}'."
+                )
+            raise K8sClientError(
+                f"Resource type '{resource_type}' is not supported for replacement."
+            )
+
+        try:
+            api_call = getattr(api_client, method_name)
+            return await api_call(name=name, namespace=namespace, body=body)
+        except ApiException as e:
+            if logger:
+                logger.error(
+                    f"[{log_prefix}] API error replacing {resource_type} '{name}' in namespace '{namespace}': {self._extract_error_body(e)}",
+                    exc_info=True,
+                )
+            # Re-raise the exception so the action layer can handle it
+            raise
+        except Exception as e:
+            if logger:
+                logger.error(
+                    f"[{log_prefix}] An unexpected error occurred replacing {resource_type} '{name}': {e}",
+                    exc_info=True,
+                )
+            self.last_api_error_body = str(e)
+            raise K8sClientError(f"Unexpected error: {e}")
+
+    async def patch_namespaced_resource(
+        self,
+        resource_type: str,
+        name: str,
+        namespace: str,
+        body: Any,
+    ) -> Any:
+        logger = getattr(self, "logger", None)
+        log_prefix = "KubernetesClient"
+
+        if logger:
+            logger.debug(
+                f"[{log_prefix}] Attempting to patch resource. Raw resource_type received: '{resource_type}'"
+            )
+
+        api_method_map = {
+            "Pod": (self._core_v1_api, "patch_namespaced_pod"),
+            "Deployment": (self._apps_v1_api, "patch_namespaced_deployment"),
+            "Service": (self._core_v1_api, "patch_namespaced_service"),
+            "ConfigMap": (self._core_v1_api, "patch_namespaced_config_map"),
+            "Secret": (self._core_v1_api, "patch_namespaced_secret"),
+            "StatefulSet": (self._apps_v1_api, "patch_namespaced_stateful_set"),
+            "DaemonSet": (self._apps_v1_api, "patch_namespaced_daemon_set"),
+            "Job": (self._batch_v1_api, "patch_namespaced_job"),
+            "CronJob": (self._batch_v1_api, "patch_namespaced_cron_job"),
+            "Ingress": (self._networking_v1_api, "patch_namespaced_ingress"),
+            "PersistentVolumeClaim": (
+                self._core_v1_api,
+                "patch_namespaced_persistent_volume_claim",
+            ),
+        }
 
         normalized_resource_type = resource_type.capitalize()
         api_client_instance, method_name = api_method_map.get(
@@ -271,32 +333,27 @@ class UtilsMixin:
         ):
             if logger:
                 logger.error(
-                    f"{log_prefix}: No supported 'replace' method found for resource kind '{resource_type}'."
+                    f"[{log_prefix}] No client or method found for resource type '{resource_type}'."
                 )
-            self.last_api_error_body = f"Unsupported resource type for edit: {resource_type}"
-            return False
+            raise K8sClientError(
+                f"Resource type '{resource_type}' is not supported for patching."
+            )
 
         try:
             api_call = getattr(api_client_instance, str(method_name))
-            await api_call(name=name, namespace=namespace, body=body)
-            self.last_api_error_body = None  # Clear last error on success
-            if logger:
-                logger.info(
-                    f"{log_prefix}: Successfully replaced {resource_type} '{name}' in '{namespace}'."
-                )
-            return True
+            return await api_call(name=name, namespace=namespace, body=body)
         except ApiException as e:
             if logger:
                 logger.error(
-                    f"{log_prefix}: Failed to replace {resource_type} '{name}' in '{namespace}': {e}",
+                    f"[{log_prefix}] API error patching {resource_type} '{name}' in namespace '{namespace}': {self._extract_error_body(e)}",
                     exc_info=True,
                 )
-            self.last_api_error_body = self._extract_error_body(e)
-            raise K8sClientError(f"API Error: {e.reason}")
+            # Re-raise the exception so the action layer can handle it
+            raise
         except Exception as e:
             if logger:
                 logger.error(
-                    f"{log_prefix}: An unexpected error occurred replacing {resource_type} '{name}': {e}",
+                    f"{log_prefix}: An unexpected error occurred patching {resource_type} '{name}': {e}",
                     exc_info=True,
                 )
             self.last_api_error_body = str(e)

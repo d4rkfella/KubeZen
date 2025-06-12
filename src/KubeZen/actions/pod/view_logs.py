@@ -16,17 +16,17 @@ from KubeZen.core.signals import NavigationSignal, StaySignal
 from KubeZen.actions.pod.pod_action_utils import select_container_if_needed
 
 
-def validate_yes_no(input_str: str):
+def validate_yes_no(input_str: str) -> None:
     """Validator to ensure input is 'y' or 'n'."""
     if input_str.lower().strip() not in ["y", "n"]:
         raise ValueError("Please enter 'y' or 'n'.")
 
-def validate_positive_integer(input_str: str):
+def validate_positive_integer(input_str: str) -> None:
     """Validator to ensure input is a positive integer."""
     if not input_str.isdigit() or int(input_str) <= 0:
         raise ValueError("Please enter a positive number.")
 
-def validate_duration(input_str: str):
+def validate_duration(input_str: str) -> None:
     """Validator to ensure input is a valid duration string (e.g., 5m, 2h, 10s) or empty."""
     if not input_str:  # Allow empty string
         return
