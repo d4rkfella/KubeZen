@@ -1,80 +1,73 @@
-from KubeZen.actions.delete_resource import DeleteResourceAction
-from KubeZen.actions.describe_resource import DescribeResourceAction
-from KubeZen.actions.edit_resource import EditResourceAction
-from KubeZen.actions.view_yaml import ViewYamlAction
-from KubeZen.actions.pod.exec_into_pod import ExecIntoPodAction
-from KubeZen.actions.view_logs import ViewLogsAction
-from KubeZen.actions.pvc.file_browser_action import PVCBrowserAction
-from KubeZen.actions.port_forward import PortForwardAction
-from KubeZen.actions.workload.scale import ScaleWorkloadAction
-from KubeZen.actions.deployment.restart_rollout import RestartRolloutAction
-from KubeZen.actions.deployment.rollback import RollbackAction
+from .describe_action import DescribeResourceAction
+from .view_yaml_action import ViewYamlAction
+from .delete_action import DeleteResourceAction
+from .edit_action import EditResourceAction
+from .pvc_file_browser_action import PVCFileBrowserAction
+from .view_logs_action import ViewLogsAction
+from .port_forward_action import PortForwardAction
+from .scale_action import ScaleResourceAction
+from .exec_into_pod_action import ExecIntoPodAction
 
 ACTION_REGISTRY = [
     {
-        "class": ViewLogsAction,
-        "name": "View Logs",
-        "icon": "📜",
-        "resource_types": ["pods", "deployments", "statefulsets", "replicasets"],
-    },
-    {
-        "class": ExecIntoPodAction,
-        "name": "Exec into Pod",
-        "icon": "❯_",
-        "resource_types": ["pods"],
-    },
-    {
-        "class": DeleteResourceAction,
-        "name": "Delete",
-        "icon": "💣",
-        "resource_types": ["*"],
-    },
-    {
         "class": DescribeResourceAction,
         "name": "Describe",
-        "icon": "📝",
-        "resource_types": ["*"],
-    },
-    {
-        "class": EditResourceAction,
-        "name": "Edit",
-        "icon": "🔧",
-        "resource_types": ["*"],
+        "emoji": "🔍",
+        "resource_types": ["all"],
     },
     {
         "class": ViewYamlAction,
         "name": "View YAML",
-        "icon": "📄",
-        "resource_types": ["*"],
+        "emoji": "📄",
+        "resource_types": ["all"],
     },
     {
-        "class": PVCBrowserAction,
-        "name": "Browse PVC",
-        "icon": "📁",
+        "class": EditResourceAction,
+        "name": "Edit",
+        "emoji": "✏️",
+        "resource_types": ["all"],
+    },
+    {
+        "class": DeleteResourceAction,
+        "name": "Delete",
+        "emoji": "❌",
+        "resource_types": ["all"],
+    },
+    {
+        "class": PVCFileBrowserAction,
+        "name": "Browse Files",
+        "emoji": "📂",
         "resource_types": ["pvcs"],
+    },
+    {
+        "class": ViewLogsAction,
+        "name": "View Logs",
+        "emoji": "📜",
+        "resource_types": ["pods", "deployments", "statefulsets", "daemonsets"],
     },
     {
         "class": PortForwardAction,
         "name": "Port Forward",
-        "icon": "🔌",
+        "emoji": "🔌",
         "resource_types": ["pods", "services"],
     },
     {
-        "class": ScaleWorkloadAction,
+        "class": ScaleResourceAction,
         "name": "Scale",
-        "icon": "⚖️",
-        "resource_types": ["deployments", "statefulsets", "replicasets"],
+        "emoji": "↔️",
+        "resource_types": ["deployments", "statefulsets"],
     },
     {
-        "class": RestartRolloutAction,
-        "name": "Restart Rollout",
-        "icon": "🔄",
-        "resource_types": ["deployments"],
+        "class": ExecIntoPodAction,
+        "name": "Exec into Pod",
+        "emoji": "💻",
+        "resource_types": ["pods"],
     },
-    {
-        "class": RollbackAction,
-        "name": "Rollback",
-        "icon": "⏪",
-        "resource_types": ["deployments"],
-    },
+    # Future actions will be added here, e.g.:
+    # {
+    #     "class": ViewLogsAction,
+    #     "name": "View Logs",
+    #     "emoji": "📜",
+    #     "resource_types": ["pods"],
+    # },
 ]

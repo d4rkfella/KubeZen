@@ -1,1 +1,0 @@
-# KubeZen UI Core Package

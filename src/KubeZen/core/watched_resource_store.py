@@ -1,6 +1,5 @@
 from __future__ import annotations
-
-# import sys # F401 unused
+import asyncio
 from typing import (
     Dict,
     Any,
@@ -8,109 +7,173 @@ from typing import (
     Optional,
     TYPE_CHECKING,
     Tuple,
+    Callable,
 )
 from collections import defaultdict
-import copy  # For deep copying objects if needed
-import asyncio
-import time
+import copy
+import logging
+
+from .resource_registry import RESOURCE_REGISTRY
 
 if TYPE_CHECKING:
-    from KubeZen.core.app_services import AppServices  # For ServiceBase
-
-from KubeZen.core.service_base import ServiceBase  # Import ServiceBase
-from KubeZen.core.events import ResourceStoreUpdateEvent
+    from textual.app import App
 
 
-class WatchedResourceStore(ServiceBase):  # Inherit from ServiceBase
-    """
-    Manages an in-memory cache of Kubernetes resources, primarily updated by watch events.
-    Also stores resource versions for watched lists and view versions for polling UI updates.
+class WatchedResourceStore:
+    """Store for Kubernetes resources that are being watched.
+    Provides thread-safe access to the latest state of watched resources.
     """
 
-    def __init__(self, app_services: AppServices):  # Accept AppServices
-        super().__init__(app_services)  # Call super().__init__
-        # self.logger is now set by ServiceBase
-        self.store: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(lambda: defaultdict(dict))
+    def __init__(self, app: App):
+        self.logger = logging.getLogger(__name__)
+        self.app = app
+        self.store: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(
+            lambda: defaultdict(dict)
+        )
         self.resource_versions: Dict[str, Dict[str, str]] = defaultdict(dict)
         self.lock = asyncio.Lock()
+        self._initial_load_complete: Dict[str, bool] = defaultdict(bool)
 
-        self.metrics = {
-            "store_size": {},  # {(kind, ns): count}
-            "prune_count": 0,
-        }
+        # Listeners for UI updates, keyed by resource type
+        self._listeners: dict[str, list[Callable]] = defaultdict(list)
 
-        # Access config through app_services since ServiceBase guarantees it exists
-        self.config = self.app_services.config
-        assert self.config is not None, "AppConfig must be initialized"
+    async def subscribe(
+        self,
+        resource_kind_plural: str,
+        callback: Callable,
+    ) -> None:
+        """Subscribes a listener to receive updates for a resource type."""
+        async with self.lock:
+            if callback not in self._listeners[resource_kind_plural]:
+                self._listeners[resource_kind_plural].append(callback)
 
-        self._locks: Dict[str, asyncio.Lock] = {}
-        self._publish_debounce_tasks: Dict[Tuple[str, str], asyncio.Task[None]] = {}
-        self._publish_buffer: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
-        self._publish_debounce_time = 0.1  # 100ms
-
-    def _get_resource_key_and_ref(
-        self, resource_object: Dict[str, Any], resource_kind_plural_context: Optional[str] = None
-    ) -> Optional[Tuple[str, str, str]]:
-        """Helper to extract kind, namespace, and name from a Kubernetes resource object."""
-        try:
-            kind_from_obj = resource_object.get("kind")
-            if kind_from_obj is None:
-                # self.logger.debug(
-                #     f"WatchedResourceStore: Resource object has 'kind: None'. Raw object: {str(resource_object)[:200]}..."
-                # )
-                if resource_kind_plural_context == "namespaces":
-                    kind_from_obj = "Namespace"
-
-            kind_str = str(kind_from_obj) if kind_from_obj is not None else ""
-            kind = kind_str.lower()
-
-            metadata = resource_object.get("metadata", {})
-            name = metadata.get("name")
-            obj_namespace_field = metadata.get("namespace")
-
-            effective_namespace = (
-                "cluster-scoped"
-                if kind == "namespace"
-                else obj_namespace_field or "cluster-scoped"
+    async def get_current_list(
+        self, resource_kind_plural: str, namespace: str | None = None
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Get the current list of resources and resource version for a given kind.
+        Returns a tuple of (items, resource_version).
+        
+        This method uses a lock to ensure consistent reads during updates and returns
+        deep copies of the data to prevent external mutations affecting the store's state.
+        """
+        async with self.lock:
+            all_items_for_type = self.store.get(resource_kind_plural)
+            list_rv = self.resource_versions.get(resource_kind_plural, {}).get(
+                namespace or "all-namespaces"
             )
 
-            if not name:
+            if not all_items_for_type:
+                return [], list_rv
+
+            if namespace and namespace != "--all-namespaces--":
+                # Return a deep copy to prevent mutation of the store's internal list
+                return copy.deepcopy(list(all_items_for_type.get(namespace, {}).values())), list_rv
+
+            all_items: list[dict[str, Any]] = []
+            for ns_items in all_items_for_type.values():
+                all_items.extend(copy.deepcopy(list(ns_items.values())))
+            return all_items, list_rv
+
+    async def remove_listener(self, resource_kind_plural: str, callback: Callable) -> None:
+        """Unregister a callback for a specific resource."""
+        async with self.lock:
+            if callback in self._listeners[resource_kind_plural]:
+                self._listeners[resource_kind_plural].remove(callback)
+
+    async def _notify_listeners(
+        self, event_type: str, resource_kind_plural: str, resource: dict[str, Any]
+    ) -> None:
+        """Notify all registered listeners for a specific resource type."""
+        # We must acquire the lock to safely get the list of listeners.
+        async with self.lock:
+            listeners_for_resource = self._listeners[resource_kind_plural][:]
+
+        for callback in listeners_for_resource:
+            try:
+                await callback(
+                    event_type=event_type,
+                    resource_kind_plural=resource_kind_plural,
+                    resource=resource,
+                )
+            except Exception:
+                self.logger.exception("Error calling listener %s", callback)
+
+    async def _notify_full_refresh(
+        self,
+        resource_kind_plural: str,
+        items: list[dict[str, Any]],
+        list_resource_version: str,
+    ) -> None:
+        """Notify listeners for a specific resource type that a full refresh is needed."""
+        async with self.lock:
+            listeners_for_resource = self._listeners[resource_kind_plural][:]
+
+        for callback in listeners_for_resource:
+            try:
+                await callback(
+                    event_type="FULL_REFRESH",
+                    resource_kind_plural=resource_kind_plural,
+                    resource=items,
+                    list_resource_version=list_resource_version,
+                )
+            except Exception:
+                self.logger.exception("Error calling listener %s", callback)
+
+    def _get_resource_key_and_ref(
+        self,
+        resource_object: Dict[str, Any],
+        resource_kind_plural_context: Optional[str] = None,
+    ) -> Optional[Tuple[str, str, str]]:
+        """A robust way to get the kind, namespace, and name from a resource object."""
+        try:
+            # The object from the client can be a dict or an object with attributes.
+            # We check for both.
+            metadata = resource_object.get("metadata", {})
+            if not metadata:
                 self.logger.warning(
-                    f"Resource object missing name in metadata. Kind: '{kind}', Object: {str(resource_object)[:200]}..."
+                    "Resource has no 'metadata' field. Object: %s", resource_object
                 )
                 return None
 
-            if not kind:  # If kind is still empty after attempting to get it from object
-                self.logger.warning(
-                    f"Resource object missing 'kind'. Name: '{name}', Object: {str(resource_object)[:200]}..."
-                )
-                # If plural context is given, we might be able to derive singular kind, but this indicates an issue.
-                # For now, if kind is essential and missing, we might have to return None or raise.
-                # However, for the store, the `resource_kind_plural` is the primary key.
-                # This method's 'kind' output is more for logging/validation.
+            kind_from_obj = resource_object.get("kind")
+            name = metadata.get("name")
+            obj_namespace_field = metadata.get("namespace")
 
+            # The resource kind might not be on the object itself in some list contexts,
+            # so we fall back to the context provided by the caller.
+            if kind_from_obj:
+                kind = kind_from_obj.lower().rstrip("s")
+            elif resource_kind_plural_context:
+                kind = resource_kind_plural_context.lower().rstrip("s")
+            else:
+                kind = None
+
+            # Namespaces are a special case; they are cluster-scoped but have no 'namespace' field.
+            is_namespaced_resource = resource_kind_plural_context != "namespaces"
+
+            if is_namespaced_resource:
+                effective_namespace = obj_namespace_field
+            else:
+                # This is for cluster-scoped resources like Namespace, Node, etc.
+                effective_namespace = "cluster-scoped"
+
+            if not all([kind, name, effective_namespace]):
+                self.logger.warning(
+                    "Failed to extract key fields: kind=%s, name=%s, ns=%s. Object: %s",
+                    kind,
+                    name,
+                    effective_namespace,
+                    resource_object,
+                )
+                return None
+
+            # Use singular form for kind for consistency
             return kind, effective_namespace, name
-        except AttributeError as e:  # This specific except might be less likely now with str()
+        except Exception as e:
             self.logger.error(
-                f"AttributeError accessing attributes in resource object: {e} - Object: {str(resource_object)[:200]}..."
+                "Unexpected error in _get_resource_key_and_ref: %s", e, exc_info=True
             )
             return None
-        except Exception as e:
-            self.logger.error(f"Error in _get_resource_key_and_ref: {e}")
-            return None
-
-    def _get_store_key(self, resource_kind_plural: str, namespace: Optional[str]) -> str:
-        """
-        Returns the canonical key used for the resource_versions dictionary.
-        """
-        if not self.is_namespaced(resource_kind_plural):
-            return "cluster-scoped"
-        return namespace if namespace is not None else "all-namespaces"
-
-    async def get_lock(self, resource_kind_plural: str) -> asyncio.Lock:
-        if resource_kind_plural not in self._locks:
-            self._locks[resource_kind_plural] = asyncio.Lock()
-        return self._locks[resource_kind_plural]
 
     async def replace_list(
         self,
@@ -118,329 +181,167 @@ class WatchedResourceStore(ServiceBase):  # Inherit from ServiceBase
         operation_namespace_key: str,
         resource_objects: List[Any],
         list_resource_version: str,
-        publish_update_event: bool = True,
     ) -> None:
-        """
-        Replaces the current list of resources with a new list.
-        This is used for initial list and re-listing after watch errors (410 Gone).
-        Notifies UI of the new list state based on the publish_update_event flag.
-        """
-        t0 = time.monotonic()
-        self.logger.debug(f"[TIMING] replace_list: start at {t0:.4f}")
-
         items_added_count = 0
-        lock = await self.get_lock(resource_kind_plural)
-
-        async with lock:
-            # Clear the store for this namespace
+        async with self.lock:
+            # When we get a list for all namespaces, we need to be careful.
+            # We don't want to wipe out other namespace-specific watches if they exist.
+            # The most common case is one big watch for all namespaces for a resource type.
+            # In that case, we clear the whole top-level store for that resource.
             if operation_namespace_key == "all-namespaces":
                 self.store[resource_kind_plural].clear()
             else:
+                # If it's for a specific namespace, just clear that part.
                 if operation_namespace_key in self.store[resource_kind_plural]:
                     self.store[resource_kind_plural][operation_namespace_key].clear()
 
-            # Populate with new items
+            items = []
             for resource_object in resource_objects:
-                if hasattr(resource_object, "to_dict"):
+                # Always convert to dictionary to ensure store consistency.
+                if hasattr(resource_object, "to_dict") and callable(
+                    getattr(resource_object, "to_dict")
+                ):
                     current_object = resource_object.to_dict()
-                elif isinstance(resource_object, dict):
-                    current_object = copy.deepcopy(resource_object)
                 else:
-                    continue
+                    current_object = copy.deepcopy(resource_object)
+                items.append(current_object)
 
-                _kind_singular, item_actual_namespace, item_name = self._get_resource_key_and_ref(
-                    current_object, resource_kind_plural
-                ) or (None, None, None)
+                # Ensure 'kind' is in the object for self-description.
+                if "kind" not in current_object:
+                    singular_kind = resource_kind_plural.rstrip("s")
+                    current_object["kind"] = singular_kind.capitalize()
+
+                _, item_actual_namespace, item_name = (
+                    self._get_resource_key_and_ref(current_object, resource_kind_plural)
+                    or (None, None, None)
+                )
 
                 if not item_name or not item_actual_namespace:
                     continue
 
-                target_store_bucket_ns = item_actual_namespace
-                if (
-                    operation_namespace_key != "all-namespaces"
-                    and operation_namespace_key != "cluster-scoped"
-                    and item_actual_namespace != operation_namespace_key
-                ):
-                    continue
-
-                self.store[resource_kind_plural][target_store_bucket_ns][
+                self.store[resource_kind_plural][item_actual_namespace][
                     item_name
                 ] = current_object
                 items_added_count += 1
 
-            # Update resource version with the new one
             self.resource_versions[resource_kind_plural][
                 operation_namespace_key
             ] = list_resource_version
 
-            # Notify UI of the new list state, but only if requested
-            if publish_update_event:
-                await self._publish_update_event(
-                    resource_kind_plural,
-                    operation_namespace_key,
-                    {
-                        "type": "REPLACED_LIST",
-                        "kind": resource_kind_plural,
-                        "namespace": operation_namespace_key,
-                        "count": items_added_count,
-                        "resource_version": list_resource_version,
-                    },
-                )
+            self._initial_load_complete[resource_kind_plural] = True
 
-        self.logger.debug(f"[TIMING] replace_list: finished in {time.monotonic() - t0:.4f}s")
+        # Notify listeners *after* releasing the lock to prevent deadlocks.
+        await self._notify_full_refresh(
+            resource_kind_plural, items, list_resource_version
+        )
+        self.logger.info(
+            "Replaced list for %s/%s with %s items.",
+            resource_kind_plural,
+            operation_namespace_key or "all-namespaces",
+            items_added_count,
+        )
 
     def _deep_merge(self, old: dict, new: dict) -> dict:
-        """
-        Recursively merge 'new' into 'old'.
-        Crucially, it does NOT overwrite an existing value in 'old' with None from 'new'.
-        This prevents partial watch events from corrupting a complete, cached object.
-        """
         for k, v in new.items():
             if v is None and k in old:
-                continue  # Do not overwrite existing values with None.
-
+                continue
             if k in old and isinstance(old.get(k), dict) and isinstance(v, dict):
                 old[k] = self._deep_merge(old[k], v)
             else:
                 old[k] = v
         return old
 
-    async def update_from_event(self, resource_kind_plural: str, event: Dict[str, Any]) -> None:
-        """
-        Updates the store based on a single Kubernetes watch event.
+    async def update_from_event(
+        self, resource_kind_plural: str, event: dict[str, Any]
+    ) -> None:
+        """Update the store based on a watch event.
+        The event should be a dictionary with 'type' and 'object' keys.
         """
         event_type = event.get("type")
-        raw_event_object = event.get("object")
+        resource_as_dict = event.get("object")
 
-        if not event_type or not raw_event_object:
-            self.logger.debug(f"Event missing 'type' or 'object' field: {event}")
+        if (
+            not event_type
+            or not resource_as_dict
+            or not isinstance(resource_as_dict, dict)
+        ):
             return
 
-        if hasattr(raw_event_object, "to_dict"):
-            resource_as_dict = raw_event_object.to_dict()
-        elif isinstance(raw_event_object, dict):
-            resource_as_dict = copy.deepcopy(raw_event_object)
-        else:
-            self.logger.warning(
-                f"Event object is not a dict or has no to_dict method: {type(raw_event_object)}"
-            )
-            return
+        # Ensure 'kind' is in the object for self-description.
+        if "kind" not in resource_as_dict:
+            singular_kind = resource_kind_plural.rstrip("s")
+            resource_as_dict["kind"] = singular_kind.capitalize()
 
-        key_info = self._get_resource_key_and_ref(resource_as_dict, resource_kind_plural)
+        key_info = self._get_resource_key_and_ref(
+            resource_as_dict, resource_kind_plural
+        )
         if not key_info:
             return
-        _kind_singular, namespace, name = key_info
 
-        lock = await self.get_lock(resource_kind_plural)
-        async with lock:
-            if event_type == "DELETED":
-                old_object = self.store[resource_kind_plural][namespace].pop(name, None)
-                if old_object:
-                    self.logger.debug(
-                        f"Deleted {resource_kind_plural}/{namespace}/{name} from store."
-                    )
-                    await self._publish_update_event(
-                        resource_kind_plural,
-                        namespace,
-                        {"type": event_type, "object_name": name},
-                        old_object=old_object,
-                    )
-                return
+        _, namespace, name = key_info
 
+        async with self.lock:
             if event_type == "ADDED":
                 self.store[resource_kind_plural][namespace][name] = resource_as_dict
-                await self._publish_update_event(
-                    resource_kind_plural,
-                    namespace,
-                    {"type": event_type, "object_name": name},
-                    old_object=None,
-                )
-                self.logger.debug(f"Stored ADDED for {resource_kind_plural}/{namespace}/{name}.")
+            elif event_type == "DELETED":
+                if (
+                    resource_kind_plural in self.store
+                    and namespace in self.store[resource_kind_plural]
+                    and name in self.store[resource_kind_plural][namespace]
+                ):
+                    del self.store[resource_kind_plural][namespace][name]
             elif event_type == "MODIFIED":
-                old_object = self.store[resource_kind_plural][namespace].get(name)
-
-                if old_object:
-                    # Merge the incoming partial object into the existing complete one.
-                    merged_obj = self._deep_merge(copy.deepcopy(old_object), resource_as_dict)
-                    self.store[resource_kind_plural][namespace][name] = merged_obj
+                # Deep merge to handle partial updates, but replace if not present
+                old_resource = self.store[resource_kind_plural][namespace].get(name)
+                if old_resource:
+                    self.store[resource_kind_plural][namespace][name] = (
+                        self._deep_merge(old_resource, resource_as_dict)
+                    )
                 else:
-                    # If we don't have it, the event object is the best we have.
-                    # Subsequent MODIFIED events will fill it out.
                     self.store[resource_kind_plural][namespace][name] = resource_as_dict
 
-                self.logger.debug(
-                    f"Stored MODIFIED event data for {resource_kind_plural}/{namespace}/{name}."
-                )
-
-                await self._publish_update_event(
-                    resource_kind_plural,
-                    namespace,
-                    {"type": event_type, "object_name": name},
-                    old_object=old_object,
-                )
-
-            # Update the list's resourceVersion to the one from the individual event object.
-            new_resource_version = resource_as_dict.get("metadata", {}).get("resourceVersion")
+            new_resource_version = resource_as_dict.get("metadata", {}).get(
+                "resourceVersion"
+            )
             if new_resource_version:
-                list_key_ns = (
-                    namespace if self.is_namespaced(resource_kind_plural) else "cluster-scoped"
-                )
-                self.resource_versions[resource_kind_plural][list_key_ns] = new_resource_version
+                self.resource_versions[resource_kind_plural][
+                    namespace
+                ] = new_resource_version
 
-    def get_items(
-        self,
-        resource_kind_plural: str,
-        namespace: Optional[str] = None,
-    ) -> List[Any]:
-        """
-        Returns a list of items for a given resource kind and namespace.
-        If namespace is None, it returns items from all namespaces for namespaced resources.
-        """
-        t0 = time.monotonic()
-        target_items = []
-
-        store_key = self._get_store_key(resource_kind_plural, namespace)
-
-        # Decide which namespaces to iterate over in the store
-        namespaces_to_check: List[str]
-        if store_key == "cluster-scoped":
-            namespaces_to_check = ["cluster-scoped"]
-        elif store_key == "all-namespaces":  # all namespaces
-            namespaces_to_check = list(self.store[resource_kind_plural].keys())
-        else:
-            namespaces_to_check = [store_key]
-
+        # Notify listeners outside the lock to avoid deadlocks
+        await self._notify_listeners(
+            event_type=event_type,
+            resource_kind_plural=resource_kind_plural,
+            resource=resource_as_dict,
+        )
         self.logger.debug(
-            f"get_items for {resource_kind_plural}, requested_ns={namespace}, store_key={store_key}, store_keys_to_check={namespaces_to_check}"
+            "Processed %s for %s/%s/%s", event_type, resource_kind_plural, namespace, name
         )
 
-        for ns_key in namespaces_to_check:
-            if ns_key in self.store[resource_kind_plural]:
-                for item_name, item in self.store[resource_kind_plural][ns_key].items():
-                    target_items.append(item)
-        t1 = time.monotonic()
-        self.logger.debug(
-            f"[TIMING] get_items for {resource_kind_plural} took {t1-t0:.4f}s, found {len(target_items)} items."
+    def get_one(
+        self, resource_type: str, namespace: str, resource_name: str
+    ) -> dict[str, Any] | None:
+        """Get a single resource by its type, namespace, and name."""
+        namespace_key = namespace
+        if not self.is_namespaced(resource_type):
+            namespace_key = "cluster-scoped"
+
+        return (
+            self.store.get(resource_type, {}).get(namespace_key, {}).get(resource_name)
         )
-        return target_items
-
-    def get_all_items_of_kind(self, resource_kind_plural: str) -> List[Any]:
-        """
-        Returns all stored items of a specific kind, across all namespaces.
-        """
-        all_items: List[Any] = []
-        for namespace_bucket in self.store[resource_kind_plural].values():
-            all_items.extend(namespace_bucket.values())
-        return all_items
-
-    async def update_resource_version(
-        self,
-        resource_kind_plural: str,
-        namespace: Optional[str],
-        new_resource_version: str,
-    ) -> None:
-        """Updates the stored resource version for a list operation."""
-        namespace_key = self._get_store_key(resource_kind_plural, namespace)
-        lock = await self.get_lock(resource_kind_plural)
-        async with lock:
-            current_rv = self.resource_versions.get(resource_kind_plural, {}).get(namespace_key)
-            if not current_rv or int(new_resource_version) > int(current_rv):
-                self.resource_versions[resource_kind_plural][namespace_key] = new_resource_version
-                self.logger.debug(
-                    f"Updated resourceVersion for {resource_kind_plural}/{namespace_key} to {new_resource_version}"
-                )
-
-    async def _publish_update_event(
-        self,
-        resource_kind_plural: str,
-        namespace: str,
-        change_info: Dict[str, Any],
-        old_object: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        """
-        Debounces and publishes a ResourceStoreUpdateEvent to the event bus.
-        This method collects rapid-fire changes into a buffer and schedules a
-        single event publication after a short delay, preventing event storms.
-        """
-        buffer_key = (resource_kind_plural, namespace)
-
-        # Cancel any existing, pending publish task for this resource/namespace pair.
-        if buffer_key in self._publish_debounce_tasks:
-            self._publish_debounce_tasks[buffer_key].cancel()
-
-        # Add the new change to the buffer.
-        self._publish_buffer[buffer_key].append(change_info)
-
-        # Schedule the actual publish task.
-        self._publish_debounce_tasks[buffer_key] = asyncio.create_task(
-            self._execute_publish_debounced(buffer_key)
-        )
-
-    async def _execute_publish_debounced(self, buffer_key: Tuple[str, str]) -> None:
-        """
-        Waits for the debounce period, then publishes a single event with all
-        buffered changes for a given resource kind and namespace.
-        """
-        try:
-            await asyncio.sleep(self._publish_debounce_time)
-
-            resource_kind_plural, namespace = buffer_key
-
-            # Atomically get the buffered changes and clear the buffer for the key.
-            # This prevents race conditions if a new event arrives right as this one fires.
-            changes_to_publish = self._publish_buffer.pop(buffer_key, [])
-
-            if not changes_to_publish:
-                # This can happen if the buffer was cleared by another process, though unlikely.
-                return
-
-            # For now, we still publish a single event representing a "batch" update.
-            # The `is_relevant_update` logic in the view doesn't need to know the details
-            # of every single change, just that *something* changed.
-            # We can use the details of the last change as representative.
-            final_change_info = changes_to_publish[-1]
-
-            event = ResourceStoreUpdateEvent(
-                resource_kind_plural=resource_kind_plural,
-                namespace=namespace,
-                change_details=final_change_info,  # Contains info like ADDED/MODIFIED/DELETED
-            )
-            if self.app_services.event_bus:
-                await self.app_services.event_bus.publish(event)
-            self.logger.debug(
-                f"Published batched ResourceStoreUpdateEvent for {resource_kind_plural}/{namespace} with {len(changes_to_publish)} changes."
-            )
-        except asyncio.CancelledError:
-            # This is expected when debouncing. A new event came in for the same key.
-            self.logger.debug(f"Publish task for {buffer_key} was cancelled (debounced).")
-        finally:
-            # Clean up the task entry once it's finished or cancelled.
-            self._publish_debounce_tasks.pop(buffer_key, None)
 
     def is_namespaced(self, resource_kind_plural: str) -> bool:
         """
-        Checks if a resource type is namespaced based on the RESOURCE_WATCH_CONFIG.
+        Checks if a resource type is namespaced based on the RESOURCE_REGISTRY.
         Defaults to True if not found, as most resources are namespaced.
         """
         # This is a bit of a workaround. A better solution would be to get this info
         # from the API server's discovery client.
-        from KubeZen.core.kubernetes_watch_manager import RESOURCE_WATCH_CONFIG
-
-        config = RESOURCE_WATCH_CONFIG.get(resource_kind_plural)
+        config = RESOURCE_REGISTRY.get(resource_kind_plural)
         if config and isinstance(config, dict):
-            return bool(config.get("namespaced", True))
+            return bool(config.get("is_namespaced", True))
         self.logger.warning(
-            f"Could not find namespaced config for '{resource_kind_plural}'. Defaulting to True."
+            "Could not find namespaced config for '%s'. Defaulting to True.",
+            resource_kind_plural,
         )
         return True
-
-    def get_cached_items(
-        self,
-        resource_kind_plural: str,
-        namespace: Optional[str] = None,
-    ) -> List[Any]:
-        """
-        Returns cached items. This is a simple alias for get_items.
-        This method name is used by some views to fetch data.
-        """
-        return self.get_items(resource_kind_plural, namespace=namespace)

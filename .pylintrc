@@ -17,7 +17,6 @@ disable=C0111,  # missing-docstring
 
 [REPORTS]
 output-format=text
-files-output=no
 reports=no
 evaluation=10.0 - ((float(5 * error + warning + refactor + convention) / statement) * 10)
 
@@ -43,7 +42,6 @@ docstring-min-length=-1
 max-line-length=100
 ignore-long-lines=^\s*(# )?<?https?://\S+>?$
 single-line-if-stmt=no
-no-space-check=trailing-comma,dict-separator
 max-module-lines=2000
 indent-string='    '
 
@@ -67,7 +65,6 @@ dummy-variables-rgx=_$|dummy
 additional-builtins=
 
 [CLASSES]
-ignore-iface-methods=isImplementedBy,deferred,extends,names,namesAndDescriptions,queryDescriptionFor,getBases,getDescriptionFor,getDoc,getName,getTaggedValue,getTaggedValueTags,isEqualOrExtendedBy,setTaggedValue,isImplementedByInstancesOf,adaptWith,is_implemented_by
 defining-attr-methods=__init__,__new__,setUp
 valid-classmethod-first-arg=cls
 valid-metaclass-classmethod-first-arg=mcs
@@ -91,4 +88,4 @@ ext-import-graph=
 int-import-graph=
 
 [EXCEPTIONS]
-overgeneral-exceptions=Exception 
+overgeneral-exceptions=builtins.Exception 

@@ -1,0 +1,40 @@
+DataTable {
+    width: 100%;
+    height: 1fr;
+}
+
+QuitScreen {
+    align: center middle;
+}
+
+QuitScreen > Container {
+    width: auto;
+    height: auto;
+    padding: 1 2;
+    border: round $primary;
+    background: $surface;
+}
+
+QuitScreen > Container > Horizontal {
+    width: auto;
+    height: auto;
+}
+
+QuitScreen > Container > Horizontal > Button {
+    margin: 1 2;
+    border: round $primary;
+    background: transparent;
+}
+
+ActionListItem {
+    align-horizontal: center;
+}
+
+ResourceTypeListItem {
+    align-horizontal: center;
+}
+
+#question {
+    width: 100%;
+    text-align: center;
+}
