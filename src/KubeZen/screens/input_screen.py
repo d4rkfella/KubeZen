@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 class InputScreen(ModalScreen[Optional[str]]):
     """A screen that allows the user to input text.
-    
+
     This screen provides a simple text input interface with a prompt and
     validation callback. It can be used to get user input for various purposes.
     """

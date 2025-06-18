@@ -1,87 +1,125 @@
-from typing import Any, Dict, Optional, List
+from __future__ import annotations
+from typing import Any, Optional
+import logging
+
 from .resource_events import (
     ResourceEventListener,
-    ResourceEventSource,
     ResourceAddedSignal,
     ResourceModifiedSignal,
     ResourceDeletedSignal,
     ResourceFullRefreshSignal,
+    ResourceIdentifier,
 )
 from .watched_resource_store import WatchedResourceStore
 
-class WatchedResourceStoreAdapter(ResourceEventSource):
-    """Adapts WatchedResourceStore to the ResourceEventSource interface."""
+log = logging.getLogger(__name__)
 
-    def __init__(self, store: WatchedResourceStore):
-        self._store = store
-        self._listeners: Dict[str, List[ResourceEventListener]] = {}
 
-    async def subscribe(self, resource_type: str, listener: ResourceEventListener) -> None:
-        """Subscribe to events for a specific resource type."""
-        if resource_type not in self._listeners:
-            self._listeners[resource_type] = []
-            # Subscribe to the underlying store
-            await self._store.subscribe(resource_type, self._handle_store_event)
-        
-        if listener not in self._listeners[resource_type]:
-            self._listeners[resource_type].append(listener)
+class WatchedResourceStoreAdapter:
+    """Adapts a WatchedResourceStore to forward events to a specific listener.
+    Each adapter instance handles one subscription (resource_type + namespace + listener).
+    """
 
-    async def unsubscribe(self, resource_type: str, listener: ResourceEventListener) -> None:
-        """Unsubscribe from events for a specific resource type."""
-        if resource_type in self._listeners:
-            if listener in self._listeners[resource_type]:
-                self._listeners[resource_type].remove(listener)
-            
-            if not self._listeners[resource_type]:
-                # No more listeners for this resource type
-                del self._listeners[resource_type]
-                await self._store.remove_listener(resource_type, self._handle_store_event)
-
-    async def get_current_list(self, resource_type: str, namespace: Optional[str] = None) -> tuple[List[dict[str, Any]], Optional[str]]:
-        """Get the current list of resources."""
-        return await self._store.get_current_list(resource_type, namespace)
-
-    async def _handle_store_event(
+    def __init__(
         self,
-        event_type: str,
-        resource_kind_plural: Optional[str] = None,
-        resource: Optional[Any] = None,
-        list_resource_version: Optional[str] = None,
+        store: WatchedResourceStore,
+        resource_type: str,
+        namespace: Optional[str],
+        listener: ResourceEventListener,
+        resource_version: Optional[str] = None,
+    ):
+        self._store = store
+        self._resource_type = resource_type
+        self._namespace = namespace
+        self.listener = listener
+        self._is_running = False
+        self._identifier = ResourceIdentifier(
+            resource_type=resource_type, namespace=namespace
+        )
+        # This is the list resource version from the initial list operation
+        self._list_resource_version = resource_version
+
+    async def start(self) -> None:
+        """Start forwarding events to the listener."""
+        if self._is_running:
+            return
+
+        self._is_running = True
+        log.debug(
+            "Started watching %s from list version %s",
+            self._resource_type,
+            self._list_resource_version,
+        )
+
+    async def stop(self) -> None:
+        """Stop forwarding events to the listener."""
+        self._is_running = False
+
+    def _should_process_event(self, resource_type: str, namespace: str) -> bool:
+        """Check if an event should be processed based on resource type and namespace."""
+        if not self._is_running or resource_type != self._resource_type:
+            return False
+
+        if self._namespace is not None and namespace != self._namespace:
+            return False
+
+        return True
+
+    async def on_resource_added(
+        self, resource_type: str, namespace: str, key: str, resource: dict[str, Any]
     ) -> None:
-        """Handle events from the WatchedResourceStore and convert them to ResourceEvents."""
-        if not resource_kind_plural or resource_kind_plural not in self._listeners:
+        """Forward resource added event if relevant."""
+        if not self._should_process_event(resource_type, namespace):
             return
 
-        listeners = self._listeners[resource_kind_plural]
+        event_identifier = ResourceIdentifier(
+            resource_type=resource_type, namespace=namespace
+        )
+        await self.listener.on_resource_added(
+            ResourceAddedSignal(identifier=event_identifier, resource_key=key)
+        )
 
-        if event_type == "FULL_REFRESH":
-            event = ResourceFullRefreshSignal(
-                resource_type=resource_kind_plural,
-                resource_version=list_resource_version
+    async def on_resource_modified(
+        self, resource_type: str, namespace: str, key: str, resource: dict[str, Any]
+    ) -> None:
+        """Forward resource modified event if relevant."""
+        if not self._should_process_event(resource_type, namespace):
+            return
+
+        event_identifier = ResourceIdentifier(
+            resource_type=resource_type, namespace=namespace
+        )
+        await self.listener.on_resource_modified(
+            ResourceModifiedSignal(identifier=event_identifier, resource_key=key)
+        )
+
+    async def on_resource_deleted(
+        self, resource_type: str, namespace: str, key: str
+    ) -> None:
+        """Forward resource deleted event if relevant."""
+        if not self._should_process_event(resource_type, namespace):
+            return
+
+        event_identifier = ResourceIdentifier(
+            resource_type=resource_type, namespace=namespace
+        )
+        await self.listener.on_resource_deleted(
+            ResourceDeletedSignal(identifier=event_identifier, resource_key=key)
+        )
+
+    async def on_resource_full_refresh(
+        self, resource_type: str, namespace: str
+    ) -> None:
+        """Forward resource full refresh event if relevant."""
+        if not self._should_process_event(resource_type, namespace):
+            return
+
+        event_identifier = ResourceIdentifier(
+            resource_type=resource_type, namespace=namespace
+        )
+        await self.listener.on_resource_full_refresh(
+            ResourceFullRefreshSignal(
+                identifier=event_identifier,
+                resource_version=self._list_resource_version,
             )
-            for listener in listeners:
-                await listener.on_resource_full_refresh(event)
-            return
-
-        if not resource or not isinstance(resource, dict):
-            return
-
-        resource_key = resource.get("metadata", {}).get("name")
-        if not resource_key:
-            return
-
-        event_map = {
-            "ADDED": (ResourceAddedSignal, "on_resource_added"),
-            "MODIFIED": (ResourceModifiedSignal, "on_resource_modified"),
-            "DELETED": (ResourceDeletedSignal, "on_resource_deleted")
-        }
-
-        if event_type in event_map:
-            event_class, handler_name = event_map[event_type]
-            event = event_class(
-                resource_type=resource_kind_plural,
-                resource_key=resource_key
-            )
-            for listener in listeners:
-                handler = getattr(listener, handler_name)
-                await handler(event) 
+        )

@@ -25,14 +25,24 @@ class KubernetesWatchManager:
     """
 
     def __init__(
-        self, kubernetes_client: KubernetesClient, store: WatchedResourceStore
+        self,
+        kubernetes_client: KubernetesClient,
+        store: WatchedResourceStore,
+        allow_watch_bookmarks: bool = True,
+        list_chunk_size: int | None = None,  # If set, enables pagination
+        retry_delay_seconds: int = 5,  # Delay before retrying after errors
     ):
         self.logger = logging.getLogger(__name__)
         self.kubernetes_client = kubernetes_client
         self.watched_resource_store = store
         self._watch_tasks: List[asyncio.Task] = []
         self._stop_event = asyncio.Event()
-        self.retry_delay_seconds = 5  # Simple config
+        self._initial_lists_complete = (
+            asyncio.Event()
+        )  # Track when initial lists are done
+        self.retry_delay_seconds = retry_delay_seconds
+        self.allow_watch_bookmarks = allow_watch_bookmarks
+        self.list_chunk_size = list_chunk_size
 
     def _get_api_watch_methods(
         self, resource_kind_plural: str, namespace: str | None = None
@@ -84,12 +94,31 @@ class KubernetesWatchManager:
         return api_call_function, is_specific_ns
 
     async def get_and_store_initial_list(
-        self, resource_kind_plural: str, namespace: str | None
-    ) -> str | None:
+        self,
+        resource_kind_plural: str,
+        namespace: str | None,
+        resource_version: str | None = None,
+        resource_version_match: str | None = None,
+        limit: int | None = None,
+        continue_token: str | None = None,
+    ) -> tuple[str | None, str | None]:  # Returns (resource_version, continue_token)
+        """Get the initial list of resources and store them.
+
+        Args:
+            resource_kind_plural: The resource type to list
+            namespace: Optional namespace to filter by
+            resource_version: Optional resource version for version semantics
+            resource_version_match: One of "Exact", "NotOlderThan", or None
+            limit: Optional limit on number of items to return
+            continue_token: Optional continue token for pagination
+
+        Returns:
+            Tuple of (resource_version, continue_token) or (None, None) on error
+        """
         resource_config = RESOURCE_REGISTRY.get(resource_kind_plural)
         if not isinstance(resource_config, dict):
             self.logger.error("Unsupported resource: %s", resource_kind_plural)
-            return None
+            return None, None
 
         is_namespaced_resource = resource_config.get("is_namespaced", True)
         effective_namespace = namespace if is_namespaced_resource else "cluster-scoped"
@@ -104,30 +133,49 @@ class KubernetesWatchManager:
             resource_kind_plural, namespace=namespace
         )
         if not api_methods:
-            return None
+            return None, None
         api_watch_func, is_specific_ns = api_methods
 
         list_kwargs: Dict[str, Any] = {"watch": False}
         if is_specific_ns:
             list_kwargs["namespace"] = namespace
 
+        # Add resource version semantics
+        if resource_version:
+            list_kwargs["resource_version"] = resource_version
+        if resource_version_match:
+            if resource_version_match not in ["Exact", "NotOlderThan"]:
+                self.logger.warning(
+                    "Invalid resource_version_match '%s'. Must be 'Exact' or 'NotOlderThan'.",
+                    resource_version_match,
+                )
+            else:
+                list_kwargs["resource_version_match"] = resource_version_match
+
+        # Add pagination parameters
+        if limit:
+            list_kwargs["limit"] = limit
+        if continue_token:
+            list_kwargs["continue"] = continue_token
+
         try:
             # Perform the slow network call *before* acquiring any locks.
             list_response = await api_watch_func(**list_kwargs)
             resource_version = getattr(list_response.metadata, "resource_version", None)
+            next_continue_token = getattr(list_response.metadata, "continue", None)
 
             if not resource_version:
                 self.logger.error(
                     "Could not get resource_version from list response for %s",
                     resource_kind_plural,
                 )
-                return None
+                return None, None
 
             if self.kubernetes_client.api_client is None:
                 self.logger.error(
                     "API client is not initialized, cannot sanitize objects."
                 )
-                return None
+                return None, None
 
             items = [
                 self.kubernetes_client.api_client.sanitize_for_serialization(item)
@@ -142,21 +190,55 @@ class KubernetesWatchManager:
                 resource_version,
             )
             self.logger.info(
-                "Stored %s %s from '%s'",
+                "Stored %s %s from '%s'%s",
                 len(items),
                 resource_kind_plural,
                 effective_namespace or "all",
+                " (partial list)" if limit else "",
             )
-            return str(resource_version)
+            return str(resource_version), next_continue_token
 
         except K8sApiException as e:
-            self.logger.error(
-                "API error listing %s: %s - %s",
-                resource_kind_plural,
-                e.status,
-                e.reason,
+            retry_after = (
+                e.headers.get("Retry-After") if hasattr(e, "headers") else None
             )
-            return None
+            if retry_after:
+                try:
+                    delay = int(retry_after)
+                    self.logger.info(
+                        "Server requested retry after %s seconds for %s",
+                        delay,
+                        resource_kind_plural,
+                    )
+                    await asyncio.sleep(delay)
+                except ValueError:
+                    pass
+
+            if e.status == 410:
+                self.logger.warning(
+                    "Resource version %s no longer available for %s. Need to relist.",
+                    resource_version,
+                    resource_kind_plural,
+                )
+                # Try again without resource version constraints
+                if resource_version or resource_version_match:
+                    return await self.get_and_store_initial_list(
+                        resource_kind_plural,
+                        namespace,
+                        resource_version=None,
+                        resource_version_match=None,
+                        limit=limit,
+                        continue_token=continue_token,
+                    )
+            else:
+                self.logger.error(
+                    "API error listing %s: %s - %s",
+                    resource_kind_plural,
+                    e.status,
+                    e.reason,
+                )
+            return None, None
+
         except Exception as e:
             self.logger.error(
                 "Unexpected error listing %s: %s",
@@ -164,7 +246,7 @@ class KubernetesWatchManager:
                 e,
                 exc_info=True,
             )
-            return None
+            return None, None
 
     async def _process_watch_event(
         self, watch_id: str, resource_kind_plural: str, event: Dict[str, Any]
@@ -176,9 +258,7 @@ class KubernetesWatchManager:
 
         if event_type == "ERROR":
             self.logger.error(
-                "[%s] Watch stream received an ERROR event: %s",
-                watch_id,
-                event
+                "[%s] Watch stream received an ERROR event: %s", watch_id, event
             )
             return None
 
@@ -256,16 +336,45 @@ class KubernetesWatchManager:
                     # 1. Get the initial list of resources and the resource_version.
                     # This is the entry point for the loop and the recovery point after a major error.
                     self.logger.info("[%s] Performing initial list.", watch_id)
-                    resource_version = await self.get_and_store_initial_list(
-                        resource_kind_plural, api_watch_func_kwargs.get("namespace")
-                    )
-                    if not resource_version:
-                        self.logger.error(
-                            "[%s] Failed to get initial list. Retrying after delay...",
-                            watch_id,
+
+                    # Handle pagination if chunk size is set
+                    resource_version = None
+                    continue_token = None
+
+                    while True:
+                        rv, next_token = await self.get_and_store_initial_list(
+                            resource_kind_plural,
+                            api_watch_func_kwargs.get("namespace"),
+                            limit=self.list_chunk_size,
+                            continue_token=continue_token,
+                            resource_version=None,  # Don't use rv constraints during pagination
+                            resource_version_match=None,
                         )
-                        await asyncio.sleep(self.retry_delay_seconds)
+                        if not rv:
+                            self.logger.error(
+                                "[%s] Failed to get initial list. Retrying after delay...",
+                                watch_id,
+                            )
+                            await asyncio.sleep(self.retry_delay_seconds)
+                            break
+
+                        resource_version = rv  # Keep track of the latest rv
+
+                        if not next_token:  # No more pages
+                            break
+
+                        continue_token = next_token
+                        self.logger.debug(
+                            "[%s] Retrieved chunk, continuing with token: %s",
+                            watch_id,
+                            continue_token,
+                        )
+
+                    if not resource_version:
                         continue
+
+                    # Signal that this watch's initial list is complete
+                    self._initial_lists_complete.set()
 
                     # 2. Start a resilient watch sub-loop that survives timeouts.
                     while not self._stop_event.is_set():
@@ -283,7 +392,7 @@ class KubernetesWatchManager:
                                 **api_watch_func_kwargs,
                                 resource_version=resource_version,
                                 timeout_seconds=timeout_with_jitter,
-                                allow_watch_bookmarks=True,
+                                allow_watch_bookmarks=self.allow_watch_bookmarks,
                                 _preload_content=False,
                             ) as stream:
                                 try:
@@ -299,12 +408,12 @@ class KubernetesWatchManager:
                                         else:
                                             self.logger.warning(
                                                 "[%s] Event processing failed (likely malformed object). Continuing watch.",
-                                                watch_id
+                                                watch_id,
                                             )
                                 except asyncio.CancelledError:
                                     self.logger.info(
                                         "[%s] Watch stream iteration cancelled.",
-                                        watch_id
+                                        watch_id,
                                     )
                                     return
                                 except Exception as e:
@@ -317,17 +426,47 @@ class KubernetesWatchManager:
                                     should_relist = True  # Force a full re-list
                                     break
                         except asyncio.CancelledError:
-                            self.logger.info(
-                                "[%s] Watch stream cancelled.",
-                                watch_id
-                            )
+                            self.logger.info("[%s] Watch stream cancelled.", watch_id)
                             return
+                        except K8sApiException as e:
+                            retry_after = (
+                                e.headers.get("Retry-After")
+                                if hasattr(e, "headers")
+                                else None
+                            )
+                            if retry_after:
+                                try:
+                                    delay = int(retry_after)
+                                    self.logger.info(
+                                        "[%s] Server requested retry after %s seconds",
+                                        watch_id,
+                                        delay,
+                                    )
+                                    await asyncio.sleep(delay)
+                                except ValueError:
+                                    pass
+
+                            if e.status == 410:
+                                self.logger.warning(
+                                    "[%s] Watch returned 410 Gone. Re-listing.",
+                                    watch_id,
+                                )
+                                should_relist = True
+                            else:
+                                self.logger.error(
+                                    "[%s] Error in watch stream: %s",
+                                    watch_id,
+                                    e,
+                                    exc_info=True,
+                                )
+                                should_relist = True
+                            break
                         except Exception as e:
                             self.logger.error(
                                 "[%s] Error in watch stream: %s",
                                 watch_id,
                                 e,
-                                exc_info=True
+                                exc_info=True,
                             )
                             should_relist = True
                             break
@@ -337,15 +476,13 @@ class KubernetesWatchManager:
 
                         if not self._stop_event.is_set():
                             self.logger.debug(
-                                "[%s] Watch timed out, re-watching.",
-                                watch_id
+                                "[%s] Watch timed out, re-watching.", watch_id
                             )
 
                 except K8sApiException as e:
                     if e.status == 410:
                         self.logger.warning(
-                            "[%s] Watch returned 410 Gone. Re-listing.",
-                            watch_id
+                            "[%s] Watch returned 410 Gone. Re-listing.", watch_id
                         )
                     else:
                         self.logger.error(
@@ -358,10 +495,7 @@ class KubernetesWatchManager:
                         )
                         await asyncio.sleep(self.retry_delay_seconds)
                 except asyncio.CancelledError:
-                    self.logger.info(
-                        "[%s] Watch loop cancelled.",
-                        watch_id
-                    )
+                    self.logger.info("[%s] Watch loop cancelled.", watch_id)
                     return
                 except Exception as e:
                     self.logger.error(
@@ -396,8 +530,7 @@ class KubernetesWatchManager:
         )
         if not api_methods:
             self.logger.error(
-                "Cannot start watch for %s, failed to get API methods.",
-                watch_id
+                "Cannot start watch for %s, failed to get API methods.", watch_id
             )
             return
         api_watch_func, is_specific_ns = api_methods
@@ -421,10 +554,17 @@ class KubernetesWatchManager:
         """
         self.logger.info("Starting and monitoring all configured watches...")
 
+        # Reset the initial lists event
+        self._initial_lists_complete.clear()
+
         # Create and start individual watch tasks for every resource defined
         # in the central resource registry.
         for resource_type in RESOURCE_REGISTRY:
             await self._start_watch_task(resource_type)
+
+        # Wait for all initial lists to complete
+        await self._initial_lists_complete.wait()
+        self.logger.info("All initial lists completed successfully.")
 
         # Keep this coroutine running until the stop event is set
         await self._stop_event.wait()
@@ -449,23 +589,23 @@ class KubernetesWatchManager:
         if tasks:
             # Wait up to 5 seconds for graceful shutdown
             _, pending = await asyncio.wait(tasks, timeout=5)
-            
+
             # If any tasks are still pending, cancel them forcefully
             if pending:
                 self.logger.warning(
                     "%s watch tasks did not terminate gracefully, cancelling them.",
-                    len(pending)
+                    len(pending),
                 )
                 for task in pending:
                     task.cancel()
-                
+
                 # Wait for cancelled tasks to complete
                 try:
                     await asyncio.wait(pending, timeout=2)
                 except asyncio.TimeoutError:
                     self.logger.error(
                         "%s watch tasks could not be cancelled and will be orphaned.",
-                        len(pending)
+                        len(pending),
                     )
 
         self.logger.info("Watch loop shutdown process complete.")

@@ -43,26 +43,29 @@ class AppPaths:
         self.base_path: Path = self._determine_base_path()
         self.bin_path: Path = self.base_path / "bin"
 
-        # Prepend the workspace bin directory to the PATH. This allows us to
-        # use bundled tools like kubectl, tmux, etc., prioritizing them over
-        # system-installed versions. This must be done before resolving resources.
+        # Prepend the workspace bin directory to the PATH
         if self.bin_path.is_dir():
-            os.environ["PATH"] = (
-                f"{self.bin_path}{os.pathsep}{os.environ['PATH']}"
-            )
+            os.environ["PATH"] = f"{self.bin_path}{os.pathsep}{os.environ['PATH']}"
             log.info("Prepended workspace bin to PATH: %s", self.bin_path)
 
-        # A temporary directory for runtime files like sockets and logs.
-        # This directory is cleaned up automatically when the app exits.
-        self.temp_dir: Path = Path(tempfile.mkdtemp(prefix="kubezen-"))
+        # Use existing temp directory from environment or create a new one
+        temp_dir = os.environ.get("KUBEZEN_TEMP_DIR")
+        if temp_dir:
+            self.temp_dir = Path(temp_dir)
+            log.info(
+                "Using existing temp directory from environment: %s", self.temp_dir
+            )
+        else:
+            self.temp_dir = Path(tempfile.mkdtemp(prefix="kubezen-"))
+            os.environ["KUBEZEN_TEMP_DIR"] = str(self.temp_dir)
+            log.info("Created new temp directory: %s", self.temp_dir)
+
         self.tmux_socket_path: Path = self.temp_dir / "tmux.sock"
         self.yappi_stats_path: Path = self.temp_dir / "kubezen.prof"
 
         # Resolve paths to external dependencies
         self.resources: Dict[str, Path | None] = self._resolve_paths()
         self.tmux_config_path: Path | None = self.resources.get("tmux_config")
-
-        log.info("AppPaths initialized. Temp dir: %s", self.temp_dir)
 
     @staticmethod
     def _determine_base_path() -> Path:
@@ -131,22 +134,32 @@ class AppConfig:
     # --- Core Settings ---
     session_name: str = "KubeZen"
 
+    # --- Watch Manager Settings ---
+    watch_allow_bookmarks: bool = (
+        True  # Enable bookmark events for better resource version tracking
+    )
+    watch_chunk_size: int = 500  # Get resources in chunks to avoid memory spikes
+    watch_retry_delay: int = 5  # Delay in seconds before retrying after errors
+
     # --- Paths and Resources handled by AppPaths ---
     paths: AppPaths = field(init=False)
 
     # --- Singleton Pattern ---
-    _instance: AppConfig | None = None
+    _instance: ClassVar[AppConfig | None] = None
 
     def __post_init__(self) -> None:
         """Initialize paths after dataclass init."""
-        self.paths = AppPaths()
-        log.info("AppConfig initialized.")
+        # Don't create AppPaths here - it's created in get_instance
+        pass
 
     @classmethod
     def get_instance(cls) -> AppConfig:
         """Returns the singleton instance of the AppConfig."""
         if cls._instance is None:
             cls._instance = AppConfig()
+            # Create AppPaths only once when singleton is created
+            cls._instance.paths = AppPaths()
+            log.info("AppConfig singleton initialized.")
         return cls._instance
 
     def cleanup(self) -> None:

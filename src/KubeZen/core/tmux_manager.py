@@ -63,7 +63,9 @@ class TmuxManager:
                     self.session = self.server.sessions[0]
 
             if self.session:
-                log.info("Successfully connected to tmux session: %s", self.session.name)
+                log.info(
+                    "Successfully connected to tmux session: %s", self.session.name
+                )
             else:
                 log.error("Failed to find any tmux session.")
                 raise ConnectionError("Could not find the current tmux session.")
@@ -113,7 +115,9 @@ class TmuxManager:
             # The pane is created with the command, so no need to send keys.
 
             await asyncio.sleep(0.1)  # Give tmux time for the command to start
-            log.debug("Window '%s' (ID: %s) created successfully.", window_name, window.id)
+            log.debug(
+                "Window '%s' (ID: %s) created successfully.", window_name, window.id
+            )
             return window
         except Exception:
             log.exception("Failed to launch command in new window '%s'.", window_name)

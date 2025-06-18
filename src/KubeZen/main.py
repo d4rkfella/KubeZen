@@ -65,6 +65,7 @@ def _launch_logic(  # pylint: disable=R1260
     session_env = os.environ.copy()
     session_env["KUBEZEN_LOG_FILE"] = str(log_file_path)
     session_env["KUBEZEN_SOCKET_PATH"] = str(socket_path)
+    session_env["KUBEZEN_TEMP_DIR"] = str(config.paths.temp_dir)
 
     if kubeconfig:
         session_env["KUBECONFIG"] = kubeconfig

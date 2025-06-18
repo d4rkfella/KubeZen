@@ -42,10 +42,3 @@ class BaseAction:
             await self.execute()
         else:
             raise NotImplementedError("Subclasses must implement the run() method.")
-
-    async def execute(self) -> None:
-        """
-        Legacy entry point for actions.
-        Modern actions should implement run() instead.
-        """
-        pass
