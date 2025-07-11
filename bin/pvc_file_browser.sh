@@ -34,7 +34,7 @@ main_command="kubectl port-forward --namespace ${NAMESPACE} pod/${POD_NAME} ${LO
 # Announce what we're doing
 echo "--- Preparing File Browser for PVC: ${PVC_NAME} ---"
 echo "--- Pod: ${POD_NAME}, Namespace: ${NAMESPACE} ---"
-echo "--- Forwarding pod port 80 to local port ${LOCAL_PORT} ---"
+echo "--- Forwarding local port ${LOCAL_PORT} to pod port 80 ---"
 echo ""
 echo "Click to open in browser: http://localhost:${LOCAL_PORT}"
 echo ""

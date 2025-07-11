@@ -15,6 +15,7 @@ from KubeZen.config import AppConfig
 from KubeZen.core.kubernetes_client import KubernetesClient
 from KubeZen.core.model_discovery import discover_resource_models, discover_crd_models
 from KubeZen.screens.main_screen import MainScreen
+from KubeZen.screens.action_screen import ActionScreen
 from KubeZen.screens.confirmation_screen import ConfirmationScreen, ButtonInfo
 from KubeZen.screens.manifest_editor_screen import ManifestEditorScreen
 from KubeZen.core.age_tracker import AgeTracker
@@ -86,6 +87,7 @@ class KubeZenTuiApp(App[None]):
 
     SCREENS = {
         "main": MainScreen,
+        "action": ActionScreen,
     }
 
     BINDINGS = [
@@ -118,7 +120,7 @@ class KubeZenTuiApp(App[None]):
 
         # Initialize the singleton services
         self._app_logger = AppLogger.get_instance()
-
+        
         if os.environ.get("KUBEZEN_DEBUG") == "1":
             self.sub_title = "KubeZen (Debug Mode)"
 
@@ -151,7 +153,7 @@ class KubeZenTuiApp(App[None]):
     def tmux_manager(self) -> TmuxManager:
         """Returns the tmux manager."""
         return self._tmux_manager
-
+    
     async def on_mount(self) -> None:
         await self.push_screen("main")
 

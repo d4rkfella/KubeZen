@@ -1,46 +1,66 @@
 from __future__ import annotations
-from typing import Awaitable, Callable, TYPE_CHECKING, Optional, Any
+from typing import Awaitable, Callable, TYPE_CHECKING, Optional, Any, Dict, List
+from dataclasses import dataclass
 
 from textual.app import ComposeResult
-from textual.containers import Grid
+from textual.containers import Grid, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label
+from textual.widgets import Button, Input, Label, Static
 
 if TYPE_CHECKING:
     from textual.app import App
 
 
-class InputScreen(ModalScreen[Optional[str]]):
-    """A screen that allows the user to input text.
+@dataclass
+class InputInfo:
+    """A simple dataclass to hold input field information."""
 
-    This screen provides a simple text input interface with a prompt and
-    validation callback. It can be used to get user input for various purposes.
-    """
+    name: str
+    label: str
+    initial_value: Optional[str] = None
+
+
+class InputScreen(ModalScreen[Optional[Dict[str, str]]]):
+    """A modal screen that dynamically creates an input form."""
 
     def __init__(
         self,
         title: str,
-        prompt: str,
-        initial_value: str | None = None,
-        callback: Callable[[Optional[str]], Awaitable[None]] | None = None,
+        inputs: List[InputInfo],
         *,
+        static_text: str | None = None,
+        confirm_button_text: str | None = None,
         name: str | None = None,
         screen_id: str | None = None,
         classes: str | None = None,
     ) -> None:
         super().__init__(name, screen_id, classes)
         self.title_text = title
-        self.prompt_text = prompt
-        self.initial_value = initial_value
-        self.callback = callback
+        self.inputs_info = inputs
+        self.static_text = static_text
+        self.confirm_button_text = confirm_button_text
 
     def compose(self) -> ComposeResult:
+        input_fields = [
+            widget
+            for info in self.inputs_info
+            for widget in (
+                Label(info.label),
+                Input(value=info.initial_value or "", id=info.name),
+                Static(""),
+            )
+        ]
+
+        if self.static_text:
+            input_fields.insert(0, Static(self.static_text, id="input_static_text"))
+
         yield Grid(
-            Label(self.title_text, id="input_title"),
-            Label(self.prompt_text, id="input_prompt"),
-            Input(value=self.initial_value or "", id="input_field"),
+            Static(self.title_text, id="input_title"),
+            Vertical(*input_fields, id="input_fields_container"),
             Grid(
-                Button("OK", variant="primary", id="input_ok"),
+                Button(
+                    self.confirm_button_text or "OK", variant="primary", id="input_ok"
+                ),
                 Button("Cancel", variant="default", id="input_cancel"),
                 id="input_buttons",
             ),
@@ -48,25 +68,16 @@ class InputScreen(ModalScreen[Optional[str]]):
         )
 
     def on_mount(self) -> None:
-        """Focus the input widget when the screen is mounted."""
-        self.query_one(Input).focus()
+        """Focus the first input widget when the screen is mounted."""
+        first_input = self.query(Input).first()
+        if first_input:
+            first_input.focus()
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        button_id = event.button.id
-        if button_id == "input_ok":
-            value = self.query_one(Input).value
-            await self._handle_input_ok(value)
+        if event.button.id == "input_ok":
+            results = {
+                inp.id: inp.value for inp in self.query(Input) if inp.id is not None
+            }
+            self.dismiss(results)
         else:
-            await self._handle_other_button(None)
-
-    async def _handle_input_ok(self, value: Any) -> None:
-        if self.callback:
-            await self.callback(value)
-        else:
-            self.dismiss(value)
-
-    async def _handle_other_button(self, value: Any) -> None:
-        if self.callback:
-            await self.callback(value)
-        else:
-            self.dismiss(value)
+            self.dismiss(None)

@@ -1,19 +1,28 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence, Any
+from dataclasses import dataclass
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Static, Select
 from textual.reactive import reactive
-
-from ..core.resource_registry import PortInfo
+from textual import on
 
 if TYPE_CHECKING:
     from textual.app import App
 
 
-class PortForwardScreen(ModalScreen[dict[str, str] | None]):
+@dataclass(frozen=True)
+class PortInfo:
+    """A simple dataclass to hold port forwarding information."""
+
+    container_port: int
+    local_port: int | None = None
+    protocol: str = "TCP"
+
+
+class PortForwardScreen(ModalScreen[list[PortInfo] | None]):
     """A modal screen for configuring a port forward."""
 
     remote_port_value = reactive("")
@@ -21,25 +30,33 @@ class PortForwardScreen(ModalScreen[dict[str, str] | None]):
     def __init__(
         self,
         target_name: str,
-        ports: Optional[Sequence[PortInfo]] = None,
+        ports: Optional[Sequence[Any]] = None,
         *,
         name: str | None = None,
         screen_id: str | None = None,
         classes: str | None = None,
     ) -> None:
-        super().__init__(name, screen_id, classes)
+        super().__init__(name=name, id=screen_id, classes=classes)
         self.target_name = target_name
-        self.ports = ports
+        self.ports: Sequence[Any] = ports if ports is not None else []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="pf_dialog"):
             yield Static(f"Port Forward for: {self.target_name}", id="pf_title")
 
             if self.ports:
-                port_options = [
-                    (f"{p['name']} {p['number']}/{p['protocol']}", str(p["number"]))
-                    for p in self.ports
-                ]
+                port_options = []
+                for p in self.ports:
+                    # Handle both V1ServicePort and V1ContainerPort
+                    port_number = getattr(p, "container_port", getattr(p, "port", None))
+                    if port_number is None:
+                        continue
+
+                    port_name = getattr(p, "name", "")
+                    protocol = getattr(p, "protocol", "TCP")
+                    label = f"{port_name} {port_number}/{protocol}".strip()
+                    port_options.append((label, str(port_number)))
+
                 yield Label("Select a discovered port (optional):")
                 yield Select(
                     port_options,
@@ -83,15 +100,32 @@ class PortForwardScreen(ModalScreen[dict[str, str] | None]):
         if event.button.id == "cancel":
             self.dismiss(None)
         elif event.button.id == "ok":
-            local_port = self.query_one("#local_port", Input).value
-            remote_port = self.query_one("#remote_port", Input).value
+            local_port_str = self.query_one("#local_port", Input).value
+            remote_port_str = self.query_one("#remote_port", Input).value
 
-            if not remote_port:
-                self.app.notify("Remote port is required.", severity="error")
+            if not remote_port_str or not self._is_valid_port(remote_port_str):
+                self.app.notify(
+                    "Remote port is required and must be a valid port number.",
+                    severity="error",
+                )
                 return
 
-            # If local port is empty, default it to the remote port.
-            if not local_port:
-                local_port = remote_port
+            local_port = (
+                int(local_port_str)
+                if local_port_str and self._is_valid_port(local_port_str)
+                else None
+            )
 
-            self.dismiss({"local_port": local_port, "remote_port": remote_port})
+            port_info = PortInfo(
+                container_port=int(remote_port_str), local_port=local_port
+            )
+            self.dismiss([port_info])
+
+    @staticmethod
+    def _is_valid_port(value: str) -> bool:
+        """Validate if a string is a valid port number."""
+        try:
+            port = int(value)
+            return 1 <= port <= 65535
+        except (ValueError, TypeError):
+            return False

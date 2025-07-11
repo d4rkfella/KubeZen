@@ -5,7 +5,6 @@ import sys
 # Determine the project root directory (where this spec file is located)
 PROJECT_ROOT = SPECPATH # Use SPECPATH provided by PyInstaller
 
-# Path to the main script
 MAIN_SCRIPT = os.path.join(PROJECT_ROOT, 'run_kubezen.py')
 
 # Output directory for the build
@@ -67,6 +66,7 @@ a = Analysis(
         'libtmux',
         'rich',
         'textual',
+        'textual.widgets._tab_pane',
         'requests',
         'kubernetes',
         'kubernetes_asyncio',
