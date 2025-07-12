@@ -5,7 +5,7 @@ from KubeZen.actions.base_action import BaseAction, supports_resources
 from KubeZen.models.base import UIRow
 from KubeZen.models.core import NodeRow
 from KubeZen.screens.confirmation_screen import ConfirmationScreen, ButtonInfo
-from kubernetes.client.models import V1DeleteOptions, V1ObjectMeta
+from kubernetes_asyncio.client import V1DeleteOptions, V1ObjectMeta
 
 import logging
 

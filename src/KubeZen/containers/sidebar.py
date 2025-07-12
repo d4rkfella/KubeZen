@@ -90,7 +90,6 @@ class Sidebar(Tree):
                         data={
                             "type": "resource",
                             "resource_key": resource_key,
-                            "model_class": model_cls,
                         },
                     )
                 elif category == "Custom Resources":
@@ -121,7 +120,6 @@ class Sidebar(Tree):
                             data={
                                 "type": "resource",
                                 "resource_key": crd_model.plural.lower(),
-                                "model_class": crd_model,
                             },
                         )
 
@@ -166,7 +164,6 @@ class Sidebar(Tree):
                                 data={
                                     "type": "resource",
                                     "resource_key": model_cls.plural.lower(),
-                                    "model_class": model_cls,
                                 },
                             )
                 else:
@@ -185,7 +182,6 @@ class Sidebar(Tree):
                             data={
                                 "type": "resource",
                                 "resource_key": resource_key,
-                                "model_class": model_cls,
                             },
                         )
 

@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+import asyncio
+
 
 class MainScreen(Screen[None]):
     """Main screen of the application."""
@@ -177,7 +179,9 @@ class MainScreen(Screen[None]):
 
         if node.data.get("type") == "resource":
 
-            model_class: type[UIRow] = node.data.get("model_class")
+            resource_type = node.data.get("resource_key")
+
+            model_class: type[UIRow] = self.app.resource_models[resource_type]
 
             if not self._namespaces_watch_manager and model_class.namespaced:
                 namespace_model_class = self.app.resource_models["namespaces"]
@@ -254,11 +258,12 @@ class MainScreen(Screen[None]):
     async def action_close_current_tab(self) -> None:
         """Close the currently active tab and clean up associated resources."""
         tabbed_content = self.query_one("#main-content-container", TabbedContent)
-        active_pane = tabbed_content.active_pane
-        if not active_pane:
+        if not tabbed_content.active:
             return
+        
+        active_pane_id = tabbed_content.active_pane.id
 
-        await tabbed_content.remove_pane(active_pane.id)
+        await tabbed_content.remove_pane(active_pane_id)
 
         if self.app.focused:
             self.app.focused.blur()

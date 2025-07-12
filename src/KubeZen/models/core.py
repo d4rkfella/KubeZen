@@ -13,7 +13,7 @@ from .base import (
 from rich.text import Text
 from rich.markup import escape
 from typing import cast
-from kubernetes.client.models import V1Pod, V1ContainerStatus
+from kubernetes_asyncio.client import V1Pod, V1ContainerStatus
 from ..utils import sanitize_timestamp_str
 
 

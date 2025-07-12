@@ -37,11 +37,6 @@ class WorkloadsRestartAction(BaseAction):
         try:
             log.debug("Restarting workload %s", self._row_info.name)
 
-            api_client = getattr(
-                self.app.kubernetes_client, self._row_info.api_info.client_name
-            )
-            patch_workload_method = self.app.kubernetes_client.patch_namespaced_workload
-
             restarted_at = datetime.utcnow().isoformat() + "Z"
             body = {
                 "spec": {
@@ -55,11 +50,17 @@ class WorkloadsRestartAction(BaseAction):
                 }
             }
 
-            await patch_workload_method(
-                name=self._row_info.name,
+            patch_workload_method, kwargs = self.app.kubernetes_client.get_api_method_for_resource(
+                model_class=self._row_info,
+                action="patch",
                 namespace=self._row_info.namespace,
-                body=body,
             )
+            
+
+            kwargs["name"] = self._row_info.name
+            kwargs["body"] = body
+
+            await patch_workload_method(**kwargs)
 
             self.app.notify(
                 f"✅ Successfully restarted workload '{self._row_info.name}'.",
@@ -113,19 +114,20 @@ class WorkloadsScaleAction(BaseAction):
             log.debug(
                 "Scaling workload %s to %d replicas", self._row_info.name, replicas
             )
-
-            api_client = getattr(
-                self.app.kubernetes_client, self._row_info.api_client.name
-            )
-            patch_workload_method = getattr(api_client, self._row_info.patch_method_name)
-
-            body = {"spec": {"replicas": replicas}}
-
-            await patch_workload_method(
-                name=self._row_info.name,
+            
+            patch_workload_method, kwargs = self.app.kubernetes_client.get_api_method_for_resource(
+                model_class=self._row_info,
+                action="patch",
                 namespace=self._row_info.namespace,
-                body=body,
             )
+            
+            body = {"spec": {"replicas": replicas}}
+            
+            kwargs["name"] = self._row_info.name
+            kwargs["body"] = body
+
+
+            await patch_workload_method(**kwargs)
 
             self.app.notify(
                 f"✅ Successfully scaled workload {self._row_info.name} to {replicas} replicas.",

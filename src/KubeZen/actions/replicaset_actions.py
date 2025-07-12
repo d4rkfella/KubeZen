@@ -18,10 +18,10 @@ log = logging.getLogger(__name__)
 
 
 @supports_resources("replicasets")
-class ReplicaSetScaleAction(BaseAction):
+class ReplicaSetRollbackAction(BaseAction):
     """An action to scale a ReplicaSet."""
 
-    name = "Scale"
+    name = "Rollback"
 
     _row_info: ReplicaSetRow
 
@@ -73,11 +73,7 @@ class ReplicaSetScaleAction(BaseAction):
 
         if confirmed:
             try:
-                api_client = getattr(self.app.kubernetes_client, self._row_info.api_info.client_name)
-                read_method = getattr(api_client, "read_namespaced_deployment")
-                patch_method = getattr(api_client, "patch_namespaced_deployment")
-
-                parent_deployment = await read_method(
+                parent_deployment = await self.app.kubernetes_client.AppsV1Api.read_namespaced_deployment(
                     name=deployment_name,
                     namespace=self._row_info.namespace
                 )
@@ -89,7 +85,7 @@ class ReplicaSetScaleAction(BaseAction):
                     )
                 )
 
-                await patch_method(
+                await self.app.kubernetes_client.AppsV1Api.patch_namespaced_deployment(
                     name=deployment_name,  # The name of the PARENT deployment
                     namespace=self._row_info.namespace,
                     body=patch_body,

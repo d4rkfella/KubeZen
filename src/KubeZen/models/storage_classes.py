@@ -7,7 +7,7 @@ from .base import (
     ClassVar,
     column_field,
 )
-from kubernetes.client.models import V1StorageClass
+from kubernetes_asyncio.client import V1StorageClass
 from typing import cast
 
 @dataclass(frozen=True)

@@ -92,3 +92,6 @@ class ActionScreen(ModalScreen[None]):
         if selected_action:
             self.dismiss(None)
             self.app.run_worker(selected_action.execute(self.row_info))
+    
+    def __del__(self) -> None:
+        log.debug("Action screen destroyed")

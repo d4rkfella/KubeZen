@@ -10,7 +10,7 @@ from .base import (
     ABC,
     CATEGORIES,
 )
-from kubernetes.client.models import V1Deployment
+from kubernetes_asyncio.client import V1Deployment
 from typing import cast
 
 @dataclass(frozen=True)

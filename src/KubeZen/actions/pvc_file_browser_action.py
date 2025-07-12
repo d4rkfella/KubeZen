@@ -79,11 +79,6 @@ class PVCFileBrowserAction(BaseAction):
     async def execute(self, row_info: UIRow) -> None:
         self._row_info = row_info
 
-        pod_api_client = getattr(
-            self.app.kubernetes_client, PodRow.api_info["name"]
-        )
-        self.pod_api_client = pod_api_client
-
         def on_submit(results: dict[str, str] | None) -> None:
             """Callback executed after the user provides input."""
             if not results:
@@ -133,7 +128,7 @@ class PVCFileBrowserAction(BaseAction):
             log.info(
                 f"Creating file browser pod '{pod_name}' for PVC '{self._row_info.name}'."
             )
-            await self.pod_api_client.create_namespaced_pod(
+            await self.app.kubernetes_client.CoreV1Api.create_namespaced_pod(
                 namespace=self._row_info.namespace, body=pod_manifest
             )
 
@@ -175,13 +170,10 @@ class PVCFileBrowserAction(BaseAction):
         Waits for the specified pod to be in the 'Running' phase and for all its
         containers to be ready.
         """
-        if not self.pod_api_client or not self._row_info.namespace:
-            raise RuntimeError("Client or namespace not available for waiting.")
-
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
-                pod = await self.pod_api_client.read_namespaced_pod(
+                pod = await self.app.kubernetes_client.CoreV1Api.read_namespaced_pod(
                     name=pod_name, namespace=self._row_info.namespace
                 )
                 # Check 1: Pod phase must be 'Running'
@@ -203,11 +195,8 @@ class PVCFileBrowserAction(BaseAction):
     async def _cleanup_pod(self, pod_name: str) -> None:
         """Best-effort attempt to clean up the pod."""
         log.info(f"Cleaning up pod '{pod_name}' due to an error.")
-        if not self.pod_api_client or not self._row_info.namespace:
-            return
         try:
-            delete_method = getattr(self.pod_api_client, PodRow.api_info["delete_method_name"])
-            await delete_method(name=pod_name, namespace=self._row_info.namespace)
+            await self.app.kubernetes_client.CoreV1Api.delete_namespaced_pod(name=pod_name, namespace=self._row_info.namespace)
             self.app.notify(f"🧹 Cleaned up pod '{pod_name}'.", title="Cleanup")
         except ApiException:
             pass

@@ -59,6 +59,7 @@ class ViewLogsAction(BaseAction):
                 )
                 if total_containers > 1:
                     parts.append("--all-containers=true")
+        
         elif isinstance(self._row_info, (DeploymentRow, StatefulSetRow, DaemonSetRow)):
             match_labels = self._row_info.raw.spec.selector.match_labels
             selector = ",".join([f"{k}={v}" for k, v in match_labels.items()])

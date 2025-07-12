@@ -87,10 +87,10 @@ class TriggerCronJobAction(BaseAction):
                 job.metadata.annotations = {}
             job.metadata.annotations["cronjob.kubernetes.io/instantiate"] = "manual"
 
-            api_client = getattr(self.app.kubernetes_client, row_info.api_info.client_name)
-            create_method = getattr(api_client, "create_namespaced_job")
-
-            await create_method(namespace=row_info.namespace, body=job)
+            await self.app.kubernetes_client.BatchV1Api.create_namespaced_job(
+                namespace=row_info.namespace,
+                body=job,
+            )
 
             self.app.notify(
                 f"✅ Successfully triggered Job '{job_name}' from CronJob '{row_info.name}'.",
@@ -117,10 +117,7 @@ class SuspendCronJobAction(BaseAction):
         try:
             log.debug(f"Suspending CronJob '{row_info.name}'")
 
-            api_client = getattr(self.app.kubernetes_client, row_info.api_info.client_name)
-            patch_method = getattr(api_client, "patch_namespaced_cron_job")
-
-            await patch_method(
+            await self.app.kubernetes_client.BatchV1Api.patch_namespaced_cron_job(
                 name=row_info.name,
                 namespace=row_info.namespace,
                 body=({"spec": {"suspend": True}}),
@@ -151,10 +148,7 @@ class ResumeCronJobAction(BaseAction):
         try:
             log.debug(f"Resuming CronJob '{row_info.name}'")
 
-            api_client = getattr(self.app.kubernetes_client, row_info.api_info.client_name)
-            patch_method = getattr(api_client, "patch_namespaced_cron_job")
-
-            await patch_method(
+            await self.app.kubernetes_client.BatchV1Api.patch_namespaced_cron_job(
                 name=row_info.name,
                 namespace=row_info.namespace,
                 body={"spec": {"suspend": False}},
