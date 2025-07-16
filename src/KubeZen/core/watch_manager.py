@@ -112,7 +112,7 @@ class WatchManager:
                     all_items.extend(items)
                     # Only start a new watch if we don't already have one
                     if namespace not in self._tasks:
-                        self._tasks[ns] = asyncio.create_task(self._run_watch_for(namespace, rv))
+                        self._tasks[namespace] = asyncio.create_task(self._run_watch_for(namespace, rv))
                 return all_items
             self._current_update = asyncio.create_task(_watch_namespaces())
 
