@@ -1,5 +1,4 @@
 from __future__ import annotations
-import logging
 import os
 import shlex
 import sys
@@ -8,77 +7,57 @@ from typing import Optional
 
 import click
 from libtmux import Server
+from libtmux.exc import TmuxCommandNotFound
 import yaml
 
-from .config import AppConfig
+from KubeZen.config import AppConfig
+from KubeZen.app import main as run_app
 
-log = logging.getLogger(__name__)
 
-
-def _launch_logic(  # pylint: disable=R1260
-    ctx: click.Context,
+def _launch_logic(
     kubeconfig: Optional[str],
     context: Optional[str],
     debug: bool,
+    log_level: str,
 ) -> None:
-    """The core logic for launching the KubeZen TUI."""
-    # Use a basic logger for the launch script itself
-    logging.basicConfig(
-        level=logging.INFO, stream=sys.stderr, format="%(levelname)s - %(message)s"
-    )
+    """The core logic for launching the KubeZen TUI inside a tmux session."""
+    click.echo("Launching KubeZen TUI in tmux session...")
 
-    try:
-        config = AppConfig.get_instance()
-    except Exception as e:
-        logging.basicConfig(
-            level=logging.INFO, stream=sys.stderr, format="%(levelname)s - %(message)s"
-        )
-        logging.error("Failed to initialize configuration: %s", e, exc_info=True)
-        click.echo(f"Error: Failed to initialize configuration. {e}", err=True)
-        sys.exit(1)
+    config = AppConfig.get_instance()
 
-    click.echo(f"Launching KubeZen TUI in tmux session '{config.session_name}'...")
-
-    # --- Get paths from our centralized config ---
     socket_path = config.paths.tmux_socket_path
     tmux_config = config.paths.resources.get("tmux-config")
-
-    # Define the log file path in /tmp
     log_file_path = Path("/tmp") / "kubezen.log"
     if log_file_path.exists():
         try:
             log_file_path.unlink()
-        except OSError as e:
-            # Log an error if we can't delete the old log file, but continue
-            logging.warning(f"Could not remove old log file: {e}")
-
-
-    python_executable = sys.executable
+        except OSError:
+            pass  # Ignore errors
 
     if getattr(sys, "frozen", False):
-        app_command = shlex.join([str(python_executable), "--tui"])
+        app_command = shlex.join([sys.executable, "tui"])
     else:
-        run_script_path = os.path.join(config.paths.base_path, "run_kubezen.py")
-        app_command = shlex.join([str(python_executable), run_script_path, "--tui"])
-    crasher_script_path = shlex.quote(str(config.paths.base_path / "bin/crasher.sh"))
-    window_command = f"{app_command}; if [ $? -ne 0 ]; then {crasher_script_path}; fi"
+        app_command = "kubezen tui"
+
+    window_command = (
+        f"{app_command}; "
+        "exit_code=$?; "
+        "if [ $exit_code -ne 0 ]; then "
+        'echo; echo "--- KubeZen has crashed (exit code: $exit_code) ---"; '
+        "read -p 'Press Enter to close this pane...'; "
+        "fi"
+    )
 
     session_env = os.environ.copy()
-
     session_env["KUBEZEN_LOG_FILE"] = str(log_file_path)
-    session_env["KUBEZEN_TEMP_DIR"] = str(config.paths.temp_dir)
-
     if kubeconfig:
         session_env["KUBECONFIG"] = kubeconfig
     if context:
         session_env["KUBE_CONTEXT"] = context
-
-    # Enable debug mode if the flag is set.
-    if debug:
-        # This makes asyncio much more verbose about un-awaited coroutines.
+    if log_level:
+        session_env["LOG_LEVEL"] = log_level
+    if log_level == "DEBUG":
         session_env["PYTHONASYNCIODEBUG"] = "1"
-        # This signals the TUI to add a visual indicator.
-        session_env["KUBEZEN_DEBUG"] = "1"
 
     try:
         with Server(
@@ -96,58 +75,56 @@ def _launch_logic(  # pylint: disable=R1260
 
             click.echo(f"Tmux session '{session.name}' created. Attaching...")
             session.attach_session()
-            click.echo("Session detached or ended.")
-
-    except Exception as e:
-        logging.error("Failed to launch KubeZen TUI in tmux: %s", e, exc_info=True)
-        click.echo(f"Error: {e}", err=True)
+            click.echo("Session ended.")
+    except TmuxCommandNotFound:
+        click.secho("ERROR: Application binary for tmux not found.", fg="red", err=True)
         sys.exit(1)
     finally:
+        click.echo("Cleaning up...")
         config.cleanup()
+
 
 def validate_kubeconfig(ctx, param, value):
     if value:
         path = Path(value).expanduser()
-        if not path.exists():
-            raise click.BadParameter(f"Kubeconfig file not found: {path}")
         if not path.is_file():
-            raise click.BadParameter(f"Kubeconfig path is not a file: {path}")
+            click.secho(
+                f"ERROR: Kubeconfig path is not a file: {path}", fg="red", err=True
+            )
+            sys.exit(1)
     return value
+
 
 def validate_context(ctx, param, value):
     if not value:
         return value
-
     kubeconfig_path = ctx.params.get("kubeconfig") or os.environ.get("KUBECONFIG")
     if not kubeconfig_path:
-        kubeconfig_path = os.path.expanduser("~/.kube/config")
-
-    kubeconfig_path = os.path.expanduser(kubeconfig_path)
-    if not os.path.exists(kubeconfig_path):
-        raise click.BadParameter(f"Kubeconfig file not found: {kubeconfig_path}")
-
+        kubeconfig_path = Path.home() / ".kube" / "config"
+    config_path = Path(kubeconfig_path).expanduser()
+    if not config_path.exists():
+        raise click.BadParameter(f"Kubeconfig file not found: {config_path}")
     try:
-        with open(kubeconfig_path, "r") as f:
-            config = yaml.safe_load(f)
-        available_contexts = [c["name"] for c in config.get("contexts", [])]
+        config_data = yaml.safe_load(config_path.read_text())
+        contexts = [c["name"] for c in config_data.get("contexts", [])]
+        if value not in contexts:
+            raise click.BadParameter(
+                f"Context '{value}' not found. Available: {', '.join(contexts)}"
+            )
     except Exception as e:
         raise click.BadParameter(f"Failed to read kubeconfig: {e}")
-
-    if value not in available_contexts:
-        raise click.BadParameter(
-            f"Context '{value}' not found in kubeconfig '{kubeconfig_path}'. "
-            f"Available: {', '.join(available_contexts)}"
-        )
-
     return value
 
-@click.group(invoke_without_command=True)
+
+@click.group(
+    invoke_without_command=True,
+    context_settings=dict(help_option_names=["-h", "--help"]),
+)
 @click.option(
     "--kubeconfig",
     envvar="KUBECONFIG",
     callback=validate_kubeconfig,
     help="Path to the kubeconfig file.",
-    is_eager=True,
 )
 @click.option(
     "--context",
@@ -155,26 +132,43 @@ def validate_context(ctx, param, value):
     callback=validate_context,
     help="The name of the kubeconfig context to use.",
 )
+@click.option("--debug", is_flag=True, help="Enable debug mode.")
 @click.option(
-    "--debug", is_flag=True, help="Enable asyncio debug mode and visual indicator."
+    "--log_level",
+    envvar="LOG_LEVEL",
 )
 @click.pass_context
 def main(
-    ctx: click.Context,  # pylint: disable=W0613
+    ctx: click.Context,
     kubeconfig: Optional[str],
     context: Optional[str],
     debug: bool,
+    log_level: str,
 ) -> None:
-    """A TUI for Kubernetes management. Launches the TUI by default."""
-    # If no subcommand is invoked, run the launch logic
+    """A TUI for Kubernetes management.
+
+    This command acts as a launcher. By default (with no sub-command),
+    it sets up a tmux session and launches the TUI inside it.
+    """
     if ctx.invoked_subcommand is None:
-        # pylint: disable=no-value-for-parameter
         _launch_logic(
-            ctx=ctx,
             kubeconfig=kubeconfig,
             context=context,
             debug=debug,
+            log_level=log_level,
         )
+
+
+@main.command(hidden=True)
+def tui() -> None:
+    """Run the KubeZen TUI application directly.
+
+    This is intended to be run inside the tmux session created by the main launcher.
+    """
+    import asyncio
+
+    asyncio.run(run_app())
+
 
 if __name__ == "__main__":
     main()

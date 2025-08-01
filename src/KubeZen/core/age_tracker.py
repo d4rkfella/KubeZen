@@ -10,6 +10,8 @@ from typing import (
     Union,
     ClassVar,
     TYPE_CHECKING,
+    Generator,
+    Tuple,
 )
 from collections import namedtuple
 from dataclasses import dataclass, field
@@ -17,8 +19,9 @@ from dataclasses import dataclass, field
 from textual.signal import Signal
 
 if TYPE_CHECKING:
-    from ..app import KubeZenTuiApp
+    from ..app import KubeZen
     from textual.timer import Timer
+
 
 log = logging.getLogger(__name__)
 
@@ -59,14 +62,12 @@ class TrackerState:
 
     def clear_resource_type(self, resource_type: str) -> None:
         """Clear all state data for a specific resource type."""
-        if resource_type in self.age_buckets:
-            for bucket in self.age_buckets[resource_type].values():
-                bucket.clear()
-        if resource_type in self.countdown_buckets:
-            for bucket in self.countdown_buckets[resource_type].values():
-                bucket.clear()
+        # Clear age and countdown buckets
+        for bucket_dict in (self.age_buckets, self.countdown_buckets):
+            if resource_type in bucket_dict:
+                bucket_dict.pop(resource_type, None)
 
-        # Remove all mappings for this resource type
+        # Remove mappings and next threshold times for the resource type
         self.item_to_bucket_map = {
             key: bucket
             for key, bucket in self.item_to_bucket_map.items()
@@ -158,7 +159,7 @@ class AgeTracker:
     # Add singleton class variable
     _instance: ClassVar[AgeTracker | None] = None
 
-    def __init__(self, app: "KubeZenTuiApp") -> None:
+    def __init__(self, app: "KubeZen") -> None:
         """Initialize the age tracker."""
         self._app = app
         self._state = TrackerState()
@@ -171,9 +172,8 @@ class AgeTracker:
         for resource_model in self._app.resource_models.values():
             self._create_signal(resource_model.plural)
 
-
     @classmethod
-    def get_instance(cls, app: "KubeZenTuiApp") -> "AgeTracker":
+    def get_instance(cls, app: "KubeZen") -> "AgeTracker":
         """Returns the singleton instance of the AgeTracker."""
         if cls._instance is None:
             cls._instance = AgeTracker(app)
@@ -207,12 +207,6 @@ class AgeTracker:
             self._resource_signals[resource_type] = Signal(
                 self._app, f"age_updated_{resource_type}"
             )
-            self._state.age_buckets[resource_type] = {
-                bucket: [] for bucket in self.AGE_BUCKET_CONFIG
-            }
-            self._state.countdown_buckets[resource_type] = {
-                bucket: [] for bucket in self.COUNTDOWN_BUCKET_CONFIG
-            }
         return self._resource_signals[resource_type]
 
     def get_signal(self, resource_type: str) -> Signal | None:
@@ -227,83 +221,104 @@ class AgeTracker:
         field_type: str,
         resource_type: str,
     ) -> None:
-        """Add a specific field of an item to age tracking."""
+        """Track a specific field for updates."""
         if timestamp is None:
             log.debug(
                 "Not tracking field '%s' for %s because timestamp is None.", field, uid
             )
             return
 
+        # --- FIX STARTS HERE ---
+        # Ensure the nested dictionaries for the resource type exist before any operation.
+        if resource_type not in self._state.age_buckets:
+            self._state.age_buckets[resource_type] = {
+                bucket: [] for bucket in self.AGE_BUCKET_CONFIG
+            }
+        if resource_type not in self._state.countdown_buckets:
+            self._state.countdown_buckets[resource_type] = {
+                bucket: [] for bucket in self.COUNTDOWN_BUCKET_CONFIG
+            }
+        # --- FIX ENDS HERE ---
+
         now = datetime.now(timezone.utc)
         item_key = (uid, field, resource_type)
 
+        # Check if it's already being tracked and remove it to re-bucket it.
         if item_key in self._state.item_to_bucket_map:
-            self.remove_item(uid, resource_type)
+            self.remove_field(uid, field, resource_type)
 
+        # Track the field for the given UID
+        self._track_field_for_uid(uid, field)
+
+        item = TrackedItem(uid, field, timestamp, field_type, resource_type)
+        if field_type == "age":
+            self._assign_to_age_bucket(item, now)
+        elif field_type == "countdown":
+            self._assign_to_countdown_bucket(item, now)
+
+    def _track_field_for_uid(self, uid: str, field: str) -> None:
         if uid not in self._state.tracked_items_by_uid:
             self._state.tracked_items_by_uid[uid] = set()
         self._state.tracked_items_by_uid[uid].add(field)
 
-        item = TrackedItem(uid, field, timestamp, field_type, resource_type)
+    def _assign_to_age_bucket(self, item: TrackedItem, now: datetime) -> None:
+        age_seconds = (now - item.timestamp).total_seconds()
+        for bucket_name, config in self.AGE_BUCKET_CONFIG.items():
+            if age_seconds < config["threshold"]:
+                self._state.age_buckets[item.resource_type][bucket_name].append(item)
+                self._state.item_to_bucket_map[
+                    (item.uid, item.field, item.resource_type)
+                ] = bucket_name
+                self._set_next_transition_time(item, now)
+                break
 
-        if field_type == "age":
-            age_seconds = (now - timestamp).total_seconds()
-            for bucket_name, config in self.AGE_BUCKET_CONFIG.items():
-                if age_seconds < config["threshold"]:
-                    self._state.age_buckets[resource_type][bucket_name].append(item)
-                    self._state.item_to_bucket_map[item_key] = bucket_name
-                    self._set_next_transition_time(item, now)
-                    return
-        elif field_type == "countdown":
-            countdown_seconds = (timestamp - now).total_seconds()
-            if countdown_seconds < 0:  # In the past
-                return
-
-            # Find the right bucket
-            for bucket_name, config in self.COUNTDOWN_BUCKET_CONFIG.items():
-                if countdown_seconds < config["threshold"]:
-                    self._state.countdown_buckets[resource_type][bucket_name].append(
-                        item
-                    )
-                    self._state.item_to_bucket_map[item_key] = bucket_name
-                    self._set_next_transition_time(item, now)
-                    return
+    def _assign_to_countdown_bucket(self, item: TrackedItem, now: datetime) -> None:
+        countdown_seconds = (item.timestamp - now).total_seconds()
+        if countdown_seconds < 0:
+            return
+        for bucket_name, config in self.COUNTDOWN_BUCKET_CONFIG.items():
+            if countdown_seconds < config["threshold"]:
+                self._state.countdown_buckets[item.resource_type][bucket_name].append(
+                    item
+                )
+                self._state.item_to_bucket_map[
+                    (item.uid, item.field, item.resource_type)
+                ] = bucket_name
+                self._set_next_transition_time(item, now)
+                break
 
     def remove_field(self, uid: str, field: str, resource_type: str) -> None:
-        """Remove a specific field from being tracked."""
         item_key = (uid, field, resource_type)
-        bucket = self._state.item_to_bucket_map.pop(item_key, None)
-        if not bucket:
-            return
-
-        self._state.next_threshold_times.pop(item_key, None)
-
-        if bucket in self._state.age_buckets.get(resource_type, {}):
-            bucket_list = self._state.age_buckets[resource_type][bucket]
-        elif bucket in self._state.countdown_buckets.get(resource_type, {}):
-            bucket_list = self._state.countdown_buckets[resource_type][bucket]
-        else:
-            return  # Should not happen
-
-        bucket_list[:] = [
-            item
-            for item in bucket_list
-            if (item.uid, item.field, item.resource_type) != item_key
-        ]
-
-        if (
-            uid in self._state.tracked_items_by_uid
-            and field in self._state.tracked_items_by_uid[uid]
-        ):
-            self._state.tracked_items_by_uid[uid].remove(field)
+        bucket_name = self._state.item_to_bucket_map.pop(item_key, None)
+        if bucket_name:
+            # Directly remove from the correct bucket
+            self._remove_from_bucket(bucket_name, item_key, resource_type)
+            self._state.next_threshold_times.pop(item_key, None)
+            self._state.tracked_items_by_uid[uid].discard(field)
             if not self._state.tracked_items_by_uid[uid]:
-                del self._state.tracked_items_by_uid[uid]
+                self._state.tracked_items_by_uid.pop(uid)
+
+    def _remove_from_bucket(
+        self, bucket_name: str, item_key: tuple[str, str, str], resource_type: str
+    ) -> None:
+        if bucket_name in self._state.age_buckets[resource_type]:
+            self._state.age_buckets[resource_type][bucket_name] = [
+                item
+                for item in self._state.age_buckets[resource_type][bucket_name]
+                if (item.uid, item.field, item.resource_type) != item_key
+            ]
+        elif bucket_name in self._state.countdown_buckets[resource_type]:
+            self._state.countdown_buckets[resource_type][bucket_name] = [
+                item
+                for item in self._state.countdown_buckets[resource_type][bucket_name]
+                if (item.uid, item.field, item.resource_type) != item_key
+            ]
 
     def remove_item(self, uid: str, resource_type: str) -> None:
         """Remove all tracked fields for a given item UID."""
         fields_to_remove = self._state.tracked_items_by_uid.pop(uid, set())
-        for field in fields_to_remove:
-            item_key = (uid, field, resource_type)
+        for tracked_field in fields_to_remove:
+            item_key = (uid, tracked_field, resource_type)
             bucket = self._state.item_to_bucket_map.pop(item_key, None)
             if bucket is not None:
                 self._state.next_threshold_times.pop(item_key, None)
@@ -313,7 +328,7 @@ class AgeTracker:
                         for item in self._state.age_buckets[resource_type][bucket]
                         if not (
                             item.uid == uid
-                            and item.field == field
+                            and item.field == tracked_field
                             and item.resource_type == resource_type
                         )
                     ]
@@ -323,7 +338,7 @@ class AgeTracker:
                         for item in self._state.countdown_buckets[resource_type][bucket]
                         if not (
                             item.uid == uid
-                            and item.field == field
+                            and item.field == tracked_field
                             and item.resource_type == resource_type
                         )
                     ]
@@ -358,26 +373,29 @@ class AgeTracker:
                 if transition_time > now:
                     self._state.next_threshold_times[item_key] = transition_time
 
-    def _handle_transitions(self, now: datetime) -> None:
+    def _handle_transitions(
+        self, now: datetime
+    ) -> Generator[tuple[str, str, datetime, str], None, None]:
         """
         Efficiently checks for and moves items between buckets using pre-calculated
         transition times.
+
+        Yields:
+            A tuple for each transitioned item.
         """
         items_due_for_check = [
             key for key, time in self._state.next_threshold_times.items() if now >= time
         ]
 
         for item_key in items_due_for_check:
-            # It's possible the item was removed since the check, so we validate.
             current_bucket_name = self._state.item_to_bucket_map.get(item_key)
             if not current_bucket_name:
                 self._state.next_threshold_times.pop(item_key, None)
                 continue
 
-            # Find the item and its source list
+            uid, field, resource_type = item_key
             source_bucket_list = None
             config_map = None
-            uid, field, resource_type = item_key
 
             if current_bucket_name in self._state.age_buckets.get(resource_type, {}):
                 source_bucket_list = self._state.age_buckets[resource_type][
@@ -409,11 +427,9 @@ class AgeTracker:
                 self._state.next_threshold_times.pop(item_key, None)
                 continue
 
-            # We found the item. Pop it from its old bucket.
+            # Found the item. Pop from current bucket.
             item = source_bucket_list.pop(item_index)
 
-            # Now, re-place it without calling the main track_field function
-            # to avoid the remove/add cycle.
             if item.field_type == "age":
                 age_seconds = (now - item.timestamp).total_seconds()
                 for bucket_name, config in self.AGE_BUCKET_CONFIG.items():
@@ -421,7 +437,9 @@ class AgeTracker:
                         self._state.age_buckets[resource_type][bucket_name].append(item)
                         self._state.item_to_bucket_map[item_key] = bucket_name
                         self._set_next_transition_time(item, now)
+                        yield (item.uid, item.field, item.timestamp, resource_type)
                         break
+
             elif item.field_type == "countdown":
                 countdown_seconds = (item.timestamp - now).total_seconds()
                 if countdown_seconds >= 0:
@@ -432,79 +450,90 @@ class AgeTracker:
                             ].append(item)
                             self._state.item_to_bucket_map[item_key] = bucket_name
                             self._set_next_transition_time(item, now)
+                            yield (
+                                item.uid,
+                                item.field,
+                                item.timestamp,
+                                resource_type,
+                            )
                             break
 
-    def _get_age_buckets_to_refresh(self, now: datetime) -> list[str]:
-        buckets = []
-        for bucket_name, config in self.AGE_BUCKET_CONFIG.items():
-            should_refresh = False
-            if config["freq"] == "seconds":
-                should_refresh = True
-            elif config["freq"] == "minutes" and now.second == 0:
-                should_refresh = True
-            elif config["freq"] == "hours" and now.second == 0 and now.minute == 0:
-                should_refresh = True
-            elif (
-                config["freq"] == "days"
-                and now.second == 0
-                and now.minute == 0
-                and now.hour == 0
-            ):
-                should_refresh = True
-
-            if should_refresh:
-                buckets.append(bucket_name)
-        return buckets
-
-    def _get_countdown_buckets_to_refresh(self, now: datetime) -> list[str]:
-        buckets = []
-        for bucket_name, config in self.COUNTDOWN_BUCKET_CONFIG.items():
-            should_refresh = False
-            if config["freq"] == "seconds":
-                should_refresh = True
-            elif config["freq"] == "minutes" and now.second == 0:
-                should_refresh = True
-            elif config["freq"] == "hours" and now.second == 0 and now.minute == 0:
-                should_refresh = True
-            elif (
-                config["freq"] == "days"
-                and now.second == 0
-                and now.minute == 0
-                and now.hour == 0
-            ):
-                should_refresh = True
-
-            if should_refresh:
-                buckets.append(bucket_name)
-        return buckets
-
     def update_ages(self) -> None:
-        """Update ages of all tracked items and emit update signals."""
         now = datetime.now(timezone.utc)
-        self._handle_transitions(now)
 
-        age_buckets_to_refresh = self._get_age_buckets_to_refresh(now)
-        countdown_buckets_to_refresh = self._get_countdown_buckets_to_refresh(now)
+        transitioned_generator = self._handle_transitions(now)
 
-        # Group updates by resource type
-        updates_by_type: Dict[str, list[tuple[str, str, datetime]]] = {}
+        age_buckets_to_refresh = self._get_buckets_to_refresh(
+            now, self.AGE_BUCKET_CONFIG
+        )
+        countdown_buckets_to_refresh = self._get_buckets_to_refresh(
+            now, self.COUNTDOWN_BUCKET_CONFIG
+        )
 
-        for resource_type in self._state.age_buckets:
-            updates = []
-            for bucket_name in age_buckets_to_refresh:
-                for item in self._state.age_buckets[resource_type].get(bucket_name, []):
-                    updates.append((item.uid, item.field, item.timestamp))
+        updates_by_type = self._gather_bucket_updates(
+            age_buckets_to_refresh, countdown_buckets_to_refresh, now
+        )
 
-            for bucket_name in countdown_buckets_to_refresh:
-                for item in self._state.countdown_buckets[resource_type].get(
-                    bucket_name, []
-                ):
-                    updates.append((item.uid, item.field, item.timestamp))
+        for uid, tracked_field, timestamp, resource_type in transitioned_generator:
+            updates_by_type.setdefault(resource_type, []).append(
+                (uid, tracked_field, timestamp)
+            )
 
-            if updates:
-                updates_by_type[resource_type] = updates
-
-        # Emit updates for each resource type
         for resource_type, updates in updates_by_type.items():
             if resource_type in self._resource_signals:
                 self._resource_signals[resource_type].publish(updates)
+
+    def _get_buckets_to_refresh(
+        self, now: datetime, bucket_config: Dict[str, BucketConfig]
+    ) -> list[str]:
+        return [
+            bucket_name
+            for bucket_name, config in bucket_config.items()
+            if self._should_refresh_bucket(now, config["freq"])
+        ]
+
+    def _should_refresh_bucket(self, now: datetime, freq: str) -> bool:
+        if freq == "seconds":
+            return True
+        if freq == "minutes" and now.second == 0:
+            return True
+        if freq == "hours" and now.second == 0 and now.minute == 0:
+            return True
+        if freq == "days" and now.second == 0 and now.minute == 0 and now.hour == 0:
+            return True
+        return False
+
+    def _gather_bucket_updates(
+        self,
+        age_buckets_to_refresh: list[str],
+        countdown_buckets_to_refresh: list[str],
+        now: datetime,
+    ) -> Dict[str, list[tuple[str, str, datetime]]]:
+        updates_by_type: Dict[str, List[Tuple[str, str, datetime]]] = {}
+        for resource_type in self._state.age_buckets:
+            updates: List[Tuple[str, str, datetime]] = []
+            updates.extend(
+                self._collect_bucket_updates(
+                    self._state.age_buckets[resource_type], age_buckets_to_refresh, now
+                )
+            )
+            updates.extend(
+                self._collect_bucket_updates(
+                    self._state.countdown_buckets[resource_type],
+                    countdown_buckets_to_refresh,
+                    now,
+                )
+            )
+            if updates:
+                updates_by_type[resource_type] = updates
+        return updates_by_type
+
+    def _collect_bucket_updates(
+        self,
+        buckets: Dict[str, List[TrackedItem]],
+        buckets_to_refresh: list[str],
+        now: datetime,
+    ) -> Generator[tuple[str, str, datetime], None, None]:
+        for bucket_name in buckets_to_refresh:
+            for item in buckets.get(bucket_name, []):
+                yield (item.uid, item.field, item.timestamp)

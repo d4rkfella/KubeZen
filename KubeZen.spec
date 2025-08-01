@@ -1,11 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 import sys
+from pathlib import Path
+
+# --- Helper Functions for Dynamic Discovery ---
+
+def get_kubezen_modules(subpackage: str) -> list[str]:
+    """
+    Dynamically discovers all modules in a KubeZen subpackage.
+    This is used to automatically include all models and actions
+    as hidden imports for PyInstaller.
+    """
+    modules = []
+    package_dir = Path(SPECPATH) / "src" / "KubeZen" / subpackage
+    for path in package_dir.glob("*.py"):
+        if path.stem != "__init__":
+            modules.append(f"KubeZen.{subpackage}.{path.stem}")
+    return modules
+
+# --- Main Configuration ---
 
 # Determine the project root directory (where this spec file is located)
-PROJECT_ROOT = SPECPATH # Use SPECPATH provided by PyInstaller
+PROJECT_ROOT = SPECPATH
 
-MAIN_SCRIPT = os.path.join(PROJECT_ROOT, 'run_kubezen.py')
+# Correct entry point for the application
+MAIN_SCRIPT = os.path.join(PROJECT_ROOT, 'src', 'KubeZen', 'main.py')
 
 # Output directory for the build
 DIST_PATH = os.path.join(PROJECT_ROOT, 'dist')
@@ -16,65 +35,50 @@ BUILD_PATH = os.path.join(PROJECT_ROOT, 'build')
 # Name of the executable
 APP_NAME = 'kubezen'
 
-# Directory where all static binaries are located
-BIN_DIR = os.path.join(PROJECT_ROOT, 'bin')
-
-# Directory where FZF Vim plugin files are stored
-FZF_VIM_PLUGIN_DIR = os.path.join(PROJECT_ROOT, 'assets', 'fzf_vim_plugin')
-
 # --- Data and Binary Bundling ---
-# We bundle the entire 'bin' and 'assets' directories to ensure all required
-# files are included and their structure is maintained.
 
 datas_to_bundle = []
 
 # 1. Add the entire 'bin' directory.
-if os.path.isdir(BIN_DIR):
-    datas_to_bundle.append((BIN_DIR, 'bin'))
+bin_dir = Path(PROJECT_ROOT) / 'bin'
+if bin_dir.is_dir():
+    datas_to_bundle.append((str(bin_dir), 'bin'))
 else:
-    print(f"WARNING: 'bin' directory not found at {BIN_DIR}", file=sys.stderr)
+    print(f"WARNING: 'bin' directory not found at {bin_dir}", file=sys.stderr)
 
 # 2. Add the entire 'assets' directory.
-assets_dir = os.path.join(PROJECT_ROOT, 'assets')
-if os.path.isdir(assets_dir):
-    datas_to_bundle.append((assets_dir, 'assets'))
+assets_dir = Path(PROJECT_ROOT) / 'assets'
+if assets_dir.is_dir():
+    datas_to_bundle.append((str(assets_dir), 'assets'))
 else:
     print(f"WARNING: 'assets' directory not found at {assets_dir}", file=sys.stderr)
 
-# 3. Add any other resource directories here if needed in the future.
-# For example, if you still have a 'resources/terminfo'
-terminfo_dir = os.path.join(PROJECT_ROOT, 'resources', 'terminfo')
-if os.path.isdir(terminfo_dir):
-    datas_to_bundle.append((terminfo_dir, os.path.join('resources', 'terminfo')))
-
-# 4. Add the application's CSS file.
-#    The destination is 'KubeZen' so it's placed alongside the app's module.
-app_css_path = os.path.join(PROJECT_ROOT, 'src', 'KubeZen', 'app.css')
-if os.path.isfile(app_css_path):
-    datas_to_bundle.append((app_css_path, 'KubeZen'))
-else:
-    print(f"WARNING: 'app.css' not found at {app_css_path}", file=sys.stderr)
 
 # --- PyInstaller Analysis ---
+
+# Discover all models and actions automatically
+hidden_imports = get_kubezen_modules("models") + get_kubezen_modules("actions")
+# Add other essential hidden imports
+hidden_imports.extend([
+    'click',
+    'libtmux',
+    'rich',
+    'textual',
+    'textual.widgets._tab_pane',
+    'kubernetes_asyncio',
+    'yaml',
+    'typing_extensions',
+    'shutil',
+    # Add any other specific hidden imports your app needs
+])
+
+
 a = Analysis(
     [MAIN_SCRIPT],
-    pathex=[os.path.join(PROJECT_ROOT, 'src')], # Add 'src' to path
-    binaries=[],  # We now handle binaries as data files to preserve structure
+    pathex=[os.path.join(PROJECT_ROOT, 'src')],  # Add 'src' to path
+    binaries=[],
     datas=datas_to_bundle,
-    hiddenimports=[
-        'click',
-        'libtmux',
-        'rich',
-        'textual',
-        'textual.widgets._tab_pane',
-        'requests',
-        'kubernetes',
-        'kubernetes_asyncio',
-        'yaml',
-        'aiofiles',
-        'typing_extensions',
-        'shutil',
-    ],
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

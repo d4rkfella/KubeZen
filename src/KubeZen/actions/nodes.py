@@ -1,5 +1,4 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
 
 from KubeZen.actions.base_action import BaseAction, supports_resources
 from KubeZen.models.base import UIRow
@@ -8,10 +7,6 @@ from KubeZen.screens.confirmation_screen import ConfirmationScreen, ButtonInfo
 from kubernetes_asyncio.client import V1DeleteOptions, V1ObjectMeta
 
 import logging
-
-if TYPE_CHECKING:
-    from KubeZen.app import KubeZenTuiApp
-
 
 log = logging.getLogger(__name__)
 
@@ -55,14 +50,14 @@ class DrainNodeAction(BaseAction):
             # 2. Get all pods on the node
             log.info(f"Getting pods on node '{row_info.name}'")
             field_selector = f"spec.nodeName={row_info.name}"
-            pods = await self.app.kubernetes_client.CoreV1Api.list_pod_for_all_namespaces(
-                field_selector=field_selector
+            pods = (
+                await self.app.kubernetes_client.CoreV1Api.list_pod_for_all_namespaces(
+                    field_selector=field_selector
+                )
             )
 
             # 3. Evict each pod
-            log.info(
-                f"Evicting {len(pods.items)} pods from node '{row_info.name}'"
-            )
+            log.info(f"Evicting {len(pods.items)} pods from node '{row_info.name}'")
             for pod in pods.items:
                 pod_name = pod.metadata.name
                 namespace = pod.metadata.namespace

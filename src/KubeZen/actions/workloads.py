@@ -1,36 +1,35 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
+from typing import Union
 import logging
 from datetime import datetime
 
 from .base_action import BaseAction, supports_resources
-from KubeZen.models.base import UIRow
 from KubeZen.models.apps import DeploymentRow, StatefulSetRow, DaemonSetRow
 from KubeZen.screens.input_screen import InputScreen, InputInfo
-
-if TYPE_CHECKING:
-    from KubeZen.app import KubeZenTuiApp
-
 
 log = logging.getLogger(__name__)
 
 
 @supports_resources("deployments", "statefulsets", "daemonsets")
-class WorkloadsRestartAction(BaseAction):
+class WorkloadsRestartAction(BaseAction[DeploymentRow | StatefulSetRow | DaemonSetRow]):
     """An action to perform a rolling restart on a workload."""
 
     name = "Restart"
 
-    _row_info: UIRow
+    _row_info: Union[DeploymentRow, StatefulSetRow, DaemonSetRow]
 
-    def can_perform(self, row_info: UIRow) -> bool:
+    def can_perform(
+        self, row_info: Union[DeploymentRow, StatefulSetRow, DaemonSetRow]
+    ) -> bool:
         """
         For simplicity, we'll always allow restart.
         A more complex check could see if a rollout is already in progress.
         """
         return True
 
-    async def execute(self, row_info: UIRow) -> None:
+    async def execute(
+        self, row_info: Union[DeploymentRow, StatefulSetRow, DaemonSetRow]
+    ) -> None:
         """Restart the workload by patching the pod template annotations."""
         self._row_info = row_info
 
@@ -50,12 +49,13 @@ class WorkloadsRestartAction(BaseAction):
                 }
             }
 
-            patch_workload_method, kwargs = self.app.kubernetes_client.get_api_method_for_resource(
-                model_class=self._row_info,
-                action="patch",
-                namespace=self._row_info.namespace,
+            patch_workload_method, kwargs = (
+                self.app.kubernetes_client.get_api_method_for_resource(
+                    model_class=type(self._row_info),
+                    action="patch",
+                    namespace=self._row_info.namespace,
+                )
             )
-            
 
             kwargs["name"] = self._row_info.name
             kwargs["body"] = body
@@ -73,14 +73,14 @@ class WorkloadsRestartAction(BaseAction):
 
 
 @supports_resources("deployments", "statefulsets")
-class WorkloadsScaleAction(BaseAction):
+class WorkloadsScaleAction(BaseAction[DeploymentRow | StatefulSetRow]):
     """An action to scale a workload."""
 
     name = "Scale"
 
-    _row_info: UIRow
+    _row_info: Union[DeploymentRow, StatefulSetRow]
 
-    async def execute(self, row_info: UIRow) -> None:
+    async def execute(self, row_info: Union[DeploymentRow, StatefulSetRow]) -> None:
         """Scale the workload by patching the replicas field."""
         self._row_info = row_info
 
@@ -93,7 +93,7 @@ class WorkloadsScaleAction(BaseAction):
         inputs = [
             InputInfo(
                 name="replicas",
-                label=f"Desired number of replicas:",
+                label="Desired number of replicas:",
                 initial_value=str(self._row_info.replicas),
             )
         ]
@@ -114,18 +114,19 @@ class WorkloadsScaleAction(BaseAction):
             log.debug(
                 "Scaling workload %s to %d replicas", self._row_info.name, replicas
             )
-            
-            patch_workload_method, kwargs = self.app.kubernetes_client.get_api_method_for_resource(
-                model_class=self._row_info,
-                action="patch",
-                namespace=self._row_info.namespace,
+
+            patch_workload_method, kwargs = (
+                self.app.kubernetes_client.get_api_method_for_resource(
+                    model_class=type(self._row_info),
+                    action="patch",
+                    namespace=self._row_info.namespace,
+                )
             )
-            
+
             body = {"spec": {"replicas": replicas}}
-            
+
             kwargs["name"] = self._row_info.name
             kwargs["body"] = body
-
 
             await patch_workload_method(**kwargs)
 

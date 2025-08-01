@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Optional, Sequence, Any
+from typing import Optional, Sequence, Any
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
@@ -7,10 +7,6 @@ from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Static, Select
 from textual.reactive import reactive
-from textual import on
-
-if TYPE_CHECKING:
-    from textual.app import App
 
 
 @dataclass(frozen=True)

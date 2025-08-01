@@ -1,14 +1,11 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Awaitable, Callable, TYPE_CHECKING, cast, Any, Literal
+from typing import Any, Literal
 
 from textual.app import ComposeResult
 from textual.containers import Grid
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label, Input
-
-if TYPE_CHECKING:
-    from textual.app import App
+from textual.widgets import Button, Label
 
 
 @dataclass
@@ -42,7 +39,7 @@ class ConfirmationScreen(ModalScreen[Any]):
         padding-bottom: 1;
         text-style: bold;
     }
-    
+
     #prompt {
         width: 100%;
         padding-bottom: 1;
@@ -64,9 +61,8 @@ class ConfirmationScreen(ModalScreen[Any]):
     def __init__(
         self,
         buttons: list[ButtonInfo],
+        prompt: str,
         title: str | None = None,
-        prompt: str | None = None,
-        input_widget: Input | None = None,
         *,
         name: str | None = None,
         screen_id: str | None = None,
@@ -76,7 +72,6 @@ class ConfirmationScreen(ModalScreen[Any]):
         self.title_text = title
         self.prompt_text = prompt
         self.buttons_info = buttons
-        self.input_widget = input_widget
 
     def compose(self) -> ComposeResult:
         button_widgets = [
@@ -91,24 +86,7 @@ class ConfirmationScreen(ModalScreen[Any]):
                 yield Label(self.prompt_text, id="prompt")
             yield Grid(*button_widgets, id="buttons")
 
-        if self.input_widget:
-            yield self.input_widget
-
-    def on_mount(self) -> None:
-        """Focus the first button or the input widget."""
-        if self.input_widget:
-            self.input_widget.focus()
-        else:
-            self.query_one(Button).focus()
-
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id is None:
-            return
-
         button_index = int(event.button.id.split("_")[1])
         result = self.buttons_info[button_index].result
-
-        if self.input_widget:
-            self.dismiss((result, self.input_widget.value))
-        else:
-            self.dismiss(result)
+        self.dismiss(result)

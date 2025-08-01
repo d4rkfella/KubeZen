@@ -1,17 +1,13 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
 import logging
 import time
 import asyncio
 from kubernetes_asyncio.client.exceptions import ApiException
 
-from .base_action import BaseAction, supports_resources
-from ..models import UIRow
-from KubeZen.models.core import PodRow
-from ..screens.input_screen import InputScreen, InputInfo
+from KubeZen.actions.base_action import BaseAction, supports_resources
+from KubeZen.models.base import UIRow
+from KubeZen.screens.input_screen import InputScreen, InputInfo
 
-if TYPE_CHECKING:
-    from KubeZen.app import KubeZenTuiApp
 
 log = logging.getLogger(__name__)
 
@@ -123,7 +119,9 @@ class PVCFileBrowserAction(BaseAction):
         """Creates the pod, waits for it, and starts the port-forward script."""
         try:
             self.app.notify(f"🚀 Deploying pod '{pod_name}'...", title="File Browser")
-            pod_manifest = _create_pod_definition(pod_name, self._row_info.name, user_id)
+            pod_manifest = _create_pod_definition(
+                pod_name, self._row_info.name, user_id
+            )
 
             log.info(
                 f"Creating file browser pod '{pod_name}' for PVC '{self._row_info.name}'."
@@ -152,7 +150,6 @@ class PVCFileBrowserAction(BaseAction):
             await self.app.tmux_manager.launch_command_in_new_window(
                 command=command,
                 window_name=f"fb-{self._row_info.name}",
-                attach=False,
             )
             self.app.notify(
                 f"🌐 Port forward active: http://localhost:{local_port}",
@@ -196,7 +193,9 @@ class PVCFileBrowserAction(BaseAction):
         """Best-effort attempt to clean up the pod."""
         log.info(f"Cleaning up pod '{pod_name}' due to an error.")
         try:
-            await self.app.kubernetes_client.CoreV1Api.delete_namespaced_pod(name=pod_name, namespace=self._row_info.namespace)
+            await self.app.kubernetes_client.CoreV1Api.delete_namespaced_pod(
+                name=pod_name, namespace=self._row_info.namespace
+            )
             self.app.notify(f"🧹 Cleaned up pod '{pod_name}'.", title="Cleanup")
         except ApiException:
             pass

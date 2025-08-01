@@ -52,20 +52,11 @@ if !empty(s:vim_runtime_dir) && isdirectory(s:vim_runtime_dir) " Keep existing v
   execute 'set runtimepath^=' . fnameescape(s:vim_runtime_dir)
 endif
 
-" Prepend our bin directory to PATH so the correct fzf binary is found by fzf.vim
-if !empty(s:fzf_bin_dir) && isdirectory(s:fzf_bin_dir)
-  let $PATH = fnameescape(s:fzf_bin_dir) . (has('win32') || has('win64') ? ';' : ':') . $PATH
-  " Ensure fzf.vim uses the fzf from our KubeZen bin dir if it exists
-  let g:fzf_exec = fnameescape(s:fzf_bin_dir . '/fzf')
-else
-  echom "Warning: KubeZen fzf binary directory is empty or not a directory: " . s:fzf_bin_dir
-endif
-
-let g:fzf_blines_options = '--bind "f2:abort"'
+let g:fzf_blines_options = '--bind "f3:abort"'
 
 " Keybinding: Use F2 to open the :BLines search.
 " It will automatically pick up the options defined above.
-nnoremap <F2> :BLines<CR>
+nnoremap <F3> :BLines<CR>
 
 " --- Quality of Life Mappings ---
 

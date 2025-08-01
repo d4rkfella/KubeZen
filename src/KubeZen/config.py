@@ -4,7 +4,7 @@ import sys
 import shutil
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict, TypedDict, Required, Union
+from typing import ClassVar, Dict, TypedDict, Required
 import tempfile
 import logging
 
@@ -12,21 +12,16 @@ import logging
 log = logging.getLogger(__name__)
 
 
-
 class Resource(TypedDict):
     path: Required[str]
     is_executable: Required[bool]
     is_directory: Required[bool]
 
+
 class AppPaths:
     """Manages all application-related paths and resources."""
 
     REQUIRED_RESOURCES: ClassVar[Dict[str, Resource]] = {
-        "tmux": Resource(
-            path="bin/tmux",
-            is_executable=True,
-            is_directory=False,
-        ),
         "tmux-config": Resource(
             path="assets/tmux/kubezen.tmux.conf",
             is_executable=False,
@@ -41,11 +36,30 @@ class AppPaths:
             path="bin/vim",
             is_executable=True,
             is_directory=False,
-        )
+        ),
+        "fzf": Resource(
+            path="bin/fzf",
+            is_executable=True,
+            is_directory=False,
+        ),
+        "fzf_log_search": Resource(
+            path="bin/fzf_log_search.sh",
+            is_executable=True,
+            is_directory=False,
+        ),
+        "vimrc": Resource(
+            path="assets/runtime_config/app.vimrc",
+            is_executable=False,
+            is_directory=False,
+        ),
     }
+
     def __init__(self) -> None:
         self.base_path: Path = self._determine_base_path()
         self.bin_path: Path = self.base_path / "bin"
+        self.resources: Dict[str, Path | None] = self._resolve_paths(
+            AppPaths.REQUIRED_RESOURCES
+        )
 
         # Prepend the workspace bin directory to the PATH
         if self.bin_path.is_dir():
@@ -53,7 +67,7 @@ class AppPaths:
             log.info("Prepended workspace bin to PATH: %s", self.bin_path)
 
         # Use existing temp directory from environment or create a new one
-        temp_dir = os.environ.get("KUBEZEN_TEMP_DIR")
+        temp_dir = os.environ.get("TMPDIR")
         if temp_dir:
             self.temp_dir = Path(temp_dir)
             log.info(
@@ -61,14 +75,12 @@ class AppPaths:
             )
         else:
             self.temp_dir = Path(tempfile.mkdtemp(prefix="kubezen-"))
-            os.environ["KUBEZEN_TEMP_DIR"] = str(self.temp_dir)
+            os.environ["TMPDIR"] = str(self.temp_dir)
             log.info("Created new temp directory: %s", self.temp_dir)
 
-        self.tmux_socket_path: Path = self.temp_dir / "tmux.sock"
-        self.yappi_stats_path: Path = self.temp_dir / "kubezen.prof"
+        os.environ["KUBE_EDITOR"] = f"vim -u {self.resources.get("vimrc")}"
 
-        # Resolve paths to external dependencies
-        self.resources: Dict[str, Path | None] = self._resolve_paths(AppPaths.REQUIRED_RESOURCES)
+        self.tmux_socket_path: Path = self.temp_dir / "tmux.sock"
         self.tmux_config_path: Path | None = self.resources.get("tmux_config")
 
     @staticmethod
@@ -78,7 +90,9 @@ class AppPaths:
             return Path(sys._MEIPASS)
         return Path(__file__).resolve().parent.parent.parent
 
-    def _resolve_paths(self, required_resources: Dict[str, Resource]) -> Dict[str, Path | None]:
+    def _resolve_paths(
+        self, required_resources: Dict[str, Resource]
+    ) -> Dict[str, Path | None]:
         resolved_resources: Dict[str, Path | None] = {}
 
         for name, resource in required_resources.items():
@@ -132,6 +146,7 @@ class AppPaths:
         if hasattr(self, "temp_dir") and self.temp_dir.exists():
             shutil.rmtree(self.temp_dir)
             logging.info("Cleaned up temporary directory: %s", self.temp_dir)
+
 
 @dataclass(frozen=True)
 class AppConfig:

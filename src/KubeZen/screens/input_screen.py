@@ -1,14 +1,11 @@
 from __future__ import annotations
-from typing import Awaitable, Callable, TYPE_CHECKING, Optional, Any, Dict, List
+from typing import Optional, Dict, List
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
 from textual.containers import Grid, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Static
-
-if TYPE_CHECKING:
-    from textual.app import App
 
 
 @dataclass

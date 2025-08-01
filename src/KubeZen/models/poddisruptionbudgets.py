@@ -1,4 +1,13 @@
-from .base import UIRow, CATEGORIES, policy_v1_api, ApiInfo, dataclass, Any, ClassVar, column_field
+from .base import (
+    UIRow,
+    CATEGORIES,
+    policy_v1_api,
+    ApiInfo,
+    dataclass,
+    Any,
+    ClassVar,
+    column_field,
+)
 
 
 @dataclass(frozen=True)

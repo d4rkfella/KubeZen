@@ -1,17 +1,11 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
 import logging
 
 from kubernetes_asyncio.client import V1Deployment, V1DeploymentSpec
 
 from .base_action import BaseAction, supports_resources
-from ..models.apps import ReplicaSetRow, DeploymentRow
-from ..models.base import UIRow
+from KubeZen.models.apps import ReplicaSetRow
 from ..screens.confirmation_screen import ConfirmationScreen, ButtonInfo
-from ..screens.input_screen import InputScreen, InputInfo
-
-if TYPE_CHECKING:
-    from ..app import KubeZenTuiApp
 
 
 log = logging.getLogger(__name__)
@@ -29,11 +23,6 @@ class ReplicaSetRollbackAction(BaseAction):
         """
         Only allow rollback if the ReplicaSet is inactive and owned by a Deployment.
         """
-        # Ensure it's a ReplicaSetRow
-        if not isinstance(row_info, ReplicaSetRow):
-            return False
-
-        # Must be owned by a deployment to find the parent
         if not any(
             owner.kind == "Deployment"
             for owner in (row_info.raw.metadata.owner_references or [])
@@ -74,14 +63,13 @@ class ReplicaSetRollbackAction(BaseAction):
         if confirmed:
             try:
                 parent_deployment = await self.app.kubernetes_client.AppsV1Api.read_namespaced_deployment(
-                    name=deployment_name,
-                    namespace=self._row_info.namespace
+                    name=deployment_name, namespace=self._row_info.namespace
                 )
 
                 patch_body = V1Deployment(
                     spec=V1DeploymentSpec(
                         selector=parent_deployment.spec.selector,
-                        template=self._row_info.raw.spec.template
+                        template=self._row_info.raw.spec.template,
                     )
                 )
 
@@ -90,16 +78,20 @@ class ReplicaSetRollbackAction(BaseAction):
                     namespace=self._row_info.namespace,
                     body=patch_body,
                 )
-                self.app.notify(f"Deployment {deployment_name} is rolling back to the selected revision.")
+                self.app.notify(
+                    f"Deployment {deployment_name} is rolling back to the selected revision."
+                )
 
             except StopIteration:
-                message = (
-                    f"Could not find a Deployment owner for ReplicaSet %s.",
-                    self._row_info.name,
+                self.app.notify(
+                    f"Could not find a Deployment owner for ReplicaSet {self._row_info.name}.",
+                    title="Error",
+                    severity="error",
                 )
-                self.app.notify(message, title="Error", severity="error")
 
             except Exception as e:
-                message = f"Failed to scale ReplicaSet %s: %s", self._row_info, e
-                log.error(message, exc_info=True)
-                self.app.notify(message, title="Error", severity="error")
+                self.app.notify(
+                    f"Failed to scale ReplicaSet {self._row_info}: {e}",
+                    title="Error",
+                    severity="error",
+                )

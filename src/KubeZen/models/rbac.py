@@ -10,7 +10,8 @@ from .base import (
     ABC,
     abstractmethod,
 )
-    
+
+
 class BaseRbacAuthorizationV1Row(UIRow, ABC):
     """Base class for RBAC Authorization V1 API resources."""
 

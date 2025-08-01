@@ -1,18 +1,15 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Vertical, Horizontal, Grid
+from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Label, Static, SelectionList
 from textual.widgets.selection_list import Selection
 from KubeZen.models.base import UIRow
 from KubeZen.models.core import PodRow
 from textual.events import Key
-
-if TYPE_CHECKING:
-    from textual.app import App
 
 ALL_CONTAINERS_CODE = "all_containers_magic_string"
 

@@ -100,9 +100,7 @@ class CronJobRow(BaseBatchV1Row):
         )
         object.__setattr__(self, "suspend", str(self.raw.spec.suspend))
         object.__setattr__(self, "next_execution", self._get_next_schedule())
-        object.__setattr__(
-            self, "last_schedule", self.to_datetime(self.raw.status.last_schedule_time)
-        )
+        object.__setattr__(self, "last_schedule", self.raw.status.last_schedule_time)
 
     def _get_next_schedule(self) -> datetime | None:
         """Calculates the next scheduled time for the cronjob."""
@@ -111,9 +109,7 @@ class CronJobRow(BaseBatchV1Row):
 
         # Use the last scheduled time as the base for calculation,
         # falling back to the current time if it's not available.
-        base_time = self.to_datetime(
-            self.raw.status.last_schedule_time
-        ) or datetime.now(timezone.utc)
+        base_time = self.raw.status.last_schedule_time or datetime.now(timezone.utc)
 
         try:
             schedule = self.raw.spec.schedule

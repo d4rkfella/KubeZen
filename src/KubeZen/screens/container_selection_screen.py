@@ -1,13 +1,10 @@
 from __future__ import annotations
-from typing import Awaitable, Callable, TYPE_CHECKING, Any
+from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static, ListView, ListItem, Label
-
-if TYPE_CHECKING:
-    from textual.app import App
 
 
 class ActionListItem(ListItem):
@@ -29,7 +26,6 @@ class ContainerSelectionScreen(ModalScreen[str | None]):
         self,
         title: str,
         containers: list[str],
-        callback: Callable[[str | None], Awaitable[None]],
         *,
         name: str | None = None,
         screen_id: str | None = None,
@@ -38,7 +34,6 @@ class ContainerSelectionScreen(ModalScreen[str | None]):
         super().__init__(name, screen_id, classes)
         self.title_text = title
         self.containers = containers
-        self.callback = callback
 
     def compose(self) -> ComposeResult:
         with Vertical(id="list_selection_dialog"):
@@ -56,15 +51,10 @@ class ContainerSelectionScreen(ModalScreen[str | None]):
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """When a list item is selected, pop the screen and call the callback."""
         if isinstance(event.item, ActionListItem):
-            self.app.pop_screen()
-            self.app.run_worker(self.callback(event.item.data))
+            self.dismiss(event.item.data)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle the cancel button."""
         if event.button.id == "cancel":
-            self.action_cancel()
-
-    def action_cancel(self) -> None:
-        """Action to cancel the selection."""
-        self.app.pop_screen()
-        self.app.run_worker(self.callback(None))
+            self.dismiss(None)
+        self.app.notify("Exec cancelled.", title="Exec")

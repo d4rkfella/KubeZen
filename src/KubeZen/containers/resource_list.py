@@ -1,39 +1,69 @@
 from __future__ import annotations
 import logging
-from typing import Any, TYPE_CHECKING, cast, Literal, Callable
+from typing import (
+    Any,
+    cast,
+    Literal,
+    Callable,
+)
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 import re
-from enum import Enum, auto
+from functools import total_ordering, lru_cache
 
 from textual import on, work
 from textual.widgets import DataTable
 from textual.widgets.data_table import RowDoesNotExist, CellDoesNotExist, ColumnKey
-from textual.events import MouseMove, Resize, Mount
-from textual.timer import Timer
+from textual.events import MouseMove, Resize
 from textual.reactive import reactive
 from textual.signal import Signal
+import asyncio
 
 from KubeZen.core.watch_manager import WatchManager
 
 from rich.text import Text
 
-from KubeZen.models.base import UIRow
 
-if TYPE_CHECKING:
-    from KubeZen.app import KubeZenTuiApp
+from KubeZen.models.base import UIRow
+from kubernetes_asyncio.client.exceptions import ApiException
+from aiohttp.client_exceptions import ClientConnectorError
+
 
 log = logging.getLogger(__name__)
 
 
-class TimerType(Enum):
-    """Enumeration for different timer types used in ResourceList."""
+@total_ordering
+@dataclass
+class _SortKey:
+    """A rich comparison key that handles None and TypeError during sorting."""
 
-    METRICS = auto()
-    SEARCH = auto()
+    value: Any = field(compare=False)
+    is_none: bool = field(init=False, compare=False)
+
+    def __post_init__(self):
+        self.is_none = self.value is None
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _SortKey):
+            return NotImplemented
+        return bool(self.value == other.value)
+
+    def __lt__(self, other: "_SortKey") -> bool:
+        if self.is_none and not other.is_none:
+            return True
+        if not self.is_none and other.is_none:
+            return False
+        if self.is_none and other.is_none:
+            return False
+        try:
+            return bool(self.value < other.value)
+        except TypeError:
+            # Fallback to string comparison if types are not comparable
+            return str(self.value) < str(other.value)
 
 
-# --- Sorter Helper Functions ---
+_AGE_MULTIPLIERS: dict[str, int] = {"d": 24 * 60, "h": 60, "m": 1}
+_AGE_REGEX = re.compile(r"(\d+)([dhm])")
 
 
 def _sort_by_age(value: Any) -> float:
@@ -41,14 +71,9 @@ def _sort_by_age(value: Any) -> float:
     if not isinstance(value, str):
         return float("inf")
     total_minutes = 0
-    parts = re.findall(r"(\d+)([dhm])", value)
+    parts = _AGE_REGEX.findall(value)
     for val, unit in parts:
-        if unit == "d":
-            total_minutes += int(val) * 24 * 60
-        elif unit == "h":
-            total_minutes += int(val) * 60
-        elif unit == "m":
-            total_minutes += int(val)
+        total_minutes += int(val) * _AGE_MULTIPLIERS[unit]
     return total_minutes
 
 
@@ -87,26 +112,36 @@ def _sort_by_cpu(value: Any) -> float:
         return 0.0
 
 
+# A map for memory unit multipliers
+_MEMORY_MULTIPLIERS: dict[str, float] = {
+    "Ki": 1024.0,
+    "Mi": 1024.0**2,
+    "Gi": 1024.0**3,
+    "Ti": 1024.0**4,
+    "Pi": 1024.0**5,
+    "Ei": 1024.0**6,
+}
+# Pre-compiled regex for memory values
+_MEMORY_REGEX = re.compile(r"(\d+\.?\d*)\s*([KMGTPE]i)?")
+
+
 def _sort_by_memory(value: Any) -> float:
     """Converts a memory string (e.g., '512Mi') to bytes for sorting."""
-    result = 0.0
-    if isinstance(value, str) and value != "n/a":
-        try:
-            val_str = "".join(c for c in value if c.isdigit() or c == ".")
-            val = float(val_str)
-            multiplier = 1.0
-            if "Ti" in value:
-                multiplier = 1024**4
-            elif "Gi" in value:
-                multiplier = 1024**3
-            elif "Mi" in value:
-                multiplier = 1024**2
-            elif "Ki" in value:
-                multiplier = 1024
-            result = val * multiplier
-        except (ValueError, TypeError):
-            pass
-    return result
+    if not isinstance(value, str) or value == "n/a":
+        return 0.0
+
+    match = _MEMORY_REGEX.fullmatch(value.strip())
+    if not match:
+        return 0.0
+
+    val_str, unit = match.groups()
+    try:
+        val = float(val_str)
+        if unit:
+            return val * _MEMORY_MULTIPLIERS.get(unit, 1.0)
+        return val
+    except (ValueError, TypeError):
+        return 0.0
 
 
 # --- Sorter Dispatch Table ---
@@ -119,18 +154,6 @@ SORTER_DISPATCH: dict[str, Callable[[Any], Any]] = {
     "cpu": _sort_by_cpu,
     "memory": _sort_by_memory,
 }
-
-
-def _get_sortable_value_from_row(column_key: str | None, cell_value: Any) -> Any:
-    if not column_key:
-        return cell_value
-
-    # Find the specialized sorter, or fall back to returning the value directly.
-    sorter_func = SORTER_DISPATCH.get(column_key)
-    if sorter_func:
-        return sorter_func(cell_value)
-
-    return cell_value
 
 
 @dataclass(frozen=True)
@@ -157,10 +180,10 @@ class Sorting:
 class ResourceList(DataTable):
     """A data table that displays a list of Kubernetes resources."""
 
-    app: "KubeZenTuiApp" # type: ignore[assignment]
-
     resources: reactive[dict[str, UIRow]] = reactive({}, layout=False, init=False)
-    selected_namespaces: reactive[list[str]] = reactive([], layout=False, init=False)
+    selected_namespaces: reactive[set[str]] = reactive(
+        set[str](), layout=False, init=False
+    )
     first_selected_namespace: str | None = None
     visible_uids: reactive[set[str]] = reactive(set[str](), layout=False, init=False)
     search_input: reactive[str] = reactive("", layout=False, init=False)
@@ -168,10 +191,8 @@ class ResourceList(DataTable):
         {}, layout=False, init=False
     )
 
-    _model_class: type[UIRow]
-    _columns: Columns
-    _active_timers: dict[TimerType, Timer]
-    _sorting: Sorting
+    PADDING_PER_COLUMN = 2
+    OUTER_PADDING = 2
 
     DEFAULT_CSS = """
     ResourceList {
@@ -187,6 +208,7 @@ class ResourceList(DataTable):
         text-style: bold;
     }
     """
+
     def __init__(
         self,
         model_class: type[UIRow],
@@ -195,13 +217,9 @@ class ResourceList(DataTable):
         super().__init__(cursor_type="row", cursor_foreground_priority="renderable")
         self._model_class = model_class
         self.subscriptions: dict[str, Signal] = {}
-
         self._watch_manager: WatchManager = WatchManager(self.app, model_class)
-
         self._columns = Columns(self._model_class)
         self._add_columns()
-
-        self._active_timers = {}
         self.tooltip: str | None = None
         self._sorting = Sorting()
 
@@ -212,9 +230,10 @@ class ResourceList(DataTable):
 
     def __del__(self) -> None:
         """Log when the resource list is destroyed."""
-        log.debug("ResourceList for %s destroyed", self._model_class.__name__)
+        log.debug("ResourceList destroyed")
 
-    def _get_column_width(self, column_key: str) -> int:
+    @lru_cache(maxsize=128)
+    def _get_column_width(self, column_key: str, now: datetime) -> int:
         column_info = next(
             (c for c in self._columns.metadata if c["key"] == column_key), None
         )
@@ -235,7 +254,7 @@ class ResourceList(DataTable):
 
             max_content_width = max(
                 (
-                    len(formatter(getattr(self.resources[uid], column_key)))
+                    len(formatter(getattr(self.resources[uid], column_key), now))
                     for uid in self.visible_uids
                     if uid in self.resources
                     and getattr(self.resources[uid], column_key) is not None
@@ -263,28 +282,31 @@ class ResourceList(DataTable):
         if not self.visible_uids:
             return
 
-        calculated_widths = {
-            key: self._get_column_width(key) for key in self._columns.column_keys
-        }
+        column_keys = self._columns.column_keys
+        if not column_keys:
+            return
 
+        first_column_key = column_keys[0]
         is_scrollbar_visible = self.row_count > self.content_region.height
         scrollbar_width = 2 if is_scrollbar_visible else 0
-        free_space = (
-            self.size.width
-            - sum(
-                width + 2 for key, width in calculated_widths.items() if key != "name"
-            )
-            - scrollbar_width
-            - 2
-        )
+
+        fixed_width_sum = 0
+        now = datetime.now(timezone.utc)
 
         with self.app.batch_update():
-            for key, width in calculated_widths.items():
-                column_key = ColumnKey(key)
-                if key == "name":
-                    self.columns[column_key].width = max(8, free_space)
-                else:
-                    self.columns[column_key].width = width
+            for key in column_keys:
+                is_first = key == first_column_key
+                if is_first:
+                    continue  # We compute this after we know fixed_width_sum
+                width = self._get_column_width(key, now)
+                fixed_width_sum += width + self.PADDING_PER_COLUMN
+                self.columns[ColumnKey(key)].width = width
+
+            # Now compute free space for the first column and set it
+            free_space = (
+                self.size.width - fixed_width_sum - scrollbar_width - self.OUTER_PADDING
+            )
+            self.columns[ColumnKey(first_column_key)].width = max(8, free_space)
 
             self.refresh()
 
@@ -322,7 +344,6 @@ class ResourceList(DataTable):
         """Watch for changes in pod metrics and update the table."""
         if not metrics:
             return
-        log.debug("Updating pod metrics for %s pods", len(metrics))
         with self.app.batch_update():
             for uid, pod_metrics in metrics.items():
                 if uid not in self.visible_uids:
@@ -350,12 +371,10 @@ class ResourceList(DataTable):
 
     async def watch_resources(self, resources: dict[str, UIRow] | None) -> None:
         if not resources:
-            log.debug("No resources to update")
             self.visible_uids = set()
             return
 
         if not self.search_input:
-            log.debug("No search input and no visible UIDs, adding all resources")
             self.visible_uids = {resource.uid for resource in resources.values()}
         elif self.search_input:
             filtered_uids = {
@@ -378,20 +397,24 @@ class ResourceList(DataTable):
 
     async def on_mount(self) -> None:
         """Called when the widget is mounted."""
-        log.debug(
-            "[%s:%s] Mounting.", self.__class__.__name__, self._model_class.__name__
-        )
         # Populate the subscriptions' dictionary for this instance
-        self.subscriptions["resource_added"] = self._watch_manager.signals.resource_added
-        self.subscriptions[
-            "resource_deleted"
-        ] = self._watch_manager.signals.resource_deleted
-        self.subscriptions[
-            "resource_modified"
-        ] = self._watch_manager.signals.resource_modified
+        self.subscriptions["resource_added"] = (
+            self._watch_manager.signals.resource_added
+        )
+        self.subscriptions["resource_deleted"] = (
+            self._watch_manager.signals.resource_deleted
+        )
+        self.subscriptions["resource_modified"] = (
+            self._watch_manager.signals.resource_modified
+        )
+        self.subscriptions["resource_full_reset"] = (
+            self._watch_manager.signals.resource_full_reset
+        )
 
-        if age_signal := self.app.age_tracker.get_signal(self._model_class.plural):
-            self.subscriptions["age_tracker"] = age_signal
+        # if age_signal := self.app.age_tracker.get_signal(self._model_class.plural):
+        self.subscriptions["age_tracker"] = self.app.age_tracker.get_signal(
+            self._model_class.plural
+        )
 
         # Subscribe handlers directly
         self.subscriptions["resource_added"].subscribe(self, self.on_resource_added)
@@ -399,50 +422,30 @@ class ResourceList(DataTable):
         self.subscriptions["resource_modified"].subscribe(
             self, self.on_resource_modified
         )
-        if "age_tracker" in self.subscriptions:
-            self.subscriptions["age_tracker"].subscribe(self, self.on_age_update)
+        # self.subscriptions["resource_full_reset"].subscribe(
+        # self, self.on_resource_full_reset
+        # )
+
+        self.subscriptions["age_tracker"].subscribe(self, self.on_age_update)
 
         if self._model_class.plural == "pods":
-            self._active_timers[TimerType.METRICS] = self.set_interval(
-            5, self._update_metrics, name="Pod Metrics")
+            self._metrics_timer = self.set_interval(
+                5,
+                self._update_metrics,
+                name="Pod Metrics",
+            )
 
     async def on_unmount(self) -> None:
         """Cleanup subscriptions when the widget is unmounted."""
         await self._watch_manager.stop()
-        self._watch_manager = None
         for subscription in self.subscriptions.values():
             subscription.unsubscribe(self)
         self.subscriptions.clear()
+        self._get_column_width.cache_clear()
         self.app.age_tracker.clear_resource_type(self._model_class.plural)
 
-        log.debug(
-            "[%s:%s] Unmounting and stopping timers.",
-            self.__class__.__name__,
-            self._model_class.__name__,
-        )
-        for timer in self._active_timers.values():
-            timer.stop()
-        self._active_timers.clear()
-        self.workers.cancel_all()
-
-    def on_screen_resume(self) -> None:
-        """Called when the screen is resumed."""
-        log.debug(
-            "[%s:%s] Resuming screen and resuming timers.",
-            self.__class__.__name__,
-            self._model_class.__name__,
-        )
-        for timer in self._active_timers.values():
-            timer.resume()
-
-    def on_screen_suspend(self) -> None:
-        log.debug(
-            "[%s:%s] Suspending screen and pausing timers.",
-            self.__class__.__name__,
-            self._model_class.__name__,
-        )
-        for timer in self._active_timers.values():
-            timer.pause()
+        if self._model_class.plural == "pods":
+            self._metrics_timer.stop()
 
     def _add_columns(self) -> None:
         """Add columns to the data table based on the model's metadata."""
@@ -456,22 +459,13 @@ class ResourceList(DataTable):
 
     def watch_search_input(self, search_input: str) -> None:
         """Called when the search input changes."""
-        if search_timer := self._active_timers.get(TimerType.SEARCH):
-            search_timer.stop()
-
-        def do_filter() -> None:
-            """Performs the actual filtering and updates visible UIDs."""
-            if search_input == "" and self.visible_uids == self.resources.keys():
-                return
-
-            resources_matching_search = [
-                resource
-                for resource in self.resources.values()
-                if self._resource_matches_filters(resource)
-            ]
-            self.visible_uids = {resource.uid for resource in resources_matching_search}
-
-        self._active_timers[TimerType.SEARCH] = self.set_timer(0.2, do_filter)
+        if search_input == "" and self.visible_uids == self.resources.keys():
+            return
+        self.visible_uids = {
+            resource.uid
+            for resource in self.resources.values()
+            if self._resource_matches_filters(resource)
+        }
 
     def _resource_should_be_in_view(self, resource: UIRow) -> bool:
         """Checks if a resource belongs in the current namespace selection."""
@@ -493,7 +487,6 @@ class ResourceList(DataTable):
 
     def on_resource_deleted(self, data: dict[str, Any]) -> None:
         """Handles a resource deleted event."""
-        log.debug("Received resource deleted event for %s", data["resource"].uid)
         resource = data["resource"]
         uid = resource.uid
         del self.resources[uid]
@@ -513,6 +506,7 @@ class ResourceList(DataTable):
         if uid not in self.visible_uids:
             return
 
+        self._get_column_width.cache_clear()
         with self.app.batch_update():
             try:
                 # --- Update standard, non-age-tracked cells ---
@@ -549,28 +543,24 @@ class ResourceList(DataTable):
 
     def _resource_matches_filters(self, resource: UIRow) -> bool:
         # Check search filter
-        if search_text := self.search_input.lower():
-            if search_text not in resource.name.lower():
-                if not (
-                    resource.namespace and search_text in resource.namespace.lower()
-                ):
+        if search_text := self.search_input:
+            if search_text not in resource.name:
+                if not (resource.namespace and search_text in resource.namespace):
                     return False
         return True
 
     def _add_row(self, resource: UIRow) -> None:
         new_cells = [getattr(resource, key, "") for key in self._columns.column_keys]
+        now = datetime.now(timezone.utc)
 
         for field_key, field_type in self._columns.time_tracked_fields.items():
             # The datetime object should be pre-computed on the model.
-            dt_obj = getattr(resource, field_key, None)
-
-            # Ensure it's a datetime object. It could be None if the source field was missing.
-            if isinstance(dt_obj, datetime):
+            if dt_obj := getattr(resource, field_key, None):
                 age_index = self._columns.column_keys.index(field_key)
                 formatter = (
                     UIRow.format_age if field_type == "age" else UIRow.format_countdown
                 )
-                new_cells[age_index] = formatter(dt_obj)
+                new_cells[age_index] = formatter(dt_obj, now)
                 self.app.age_tracker.track_field(
                     resource.uid,
                     field_key,
@@ -599,15 +589,18 @@ class ResourceList(DataTable):
     def _sort_rows(self) -> None:
         if not self._sorting.current_column_key:
             self.sort()
-        else:
-            self.sort(
-                self._sorting.current_column_key,
-                reverse=self._sorting.reverse_order,
-                key=lambda cell_value: self._get_sortable_value_from_row(
-                    self._sorting.current_column_key, cell_value
-                ),
-            )
+            return
 
+        if sorter := SORTER_DISPATCH.get(self._sorting.current_column_key):
+            key_func = lambda value: _SortKey(sorter(value))
+        else:
+            key_func = _SortKey
+
+        self.sort(
+            self._sorting.current_column_key,
+            reverse=self._sorting.reverse_order,
+            key=key_func,
+        )
 
     @work(exclusive=True)
     async def _update_metrics(self) -> None:
@@ -623,17 +616,13 @@ class ResourceList(DataTable):
                 if uid in self.resources
             }
 
-            # Fetch fresh metrics from Kubernetes
             all_pod_metrics = await self.app.kubernetes_client.fetch_pod_metrics()
 
-            new_metrics_data = {}
-            for pod_name, metrics in all_pod_metrics.items():
-                if pod_name in name_to_uid_map:
-                    uid = name_to_uid_map[pod_name]
-                    new_metrics_data[uid] = metrics
-
-            # Update the reactive attribute, which will trigger the watcher
-            self.pod_metrics = new_metrics_data
+            self.pod_metrics = dict(
+                (name_to_uid_map[pod_name], metrics)
+                for pod_name, metrics in all_pod_metrics.items()
+                if pod_name in name_to_uid_map
+            )
 
         except Exception as e:
             log.error("Error updating metrics: %s", e)
@@ -644,7 +633,6 @@ class ResourceList(DataTable):
         try:
             self.remove_row(uid)
             self.app.age_tracker.remove_item(uid, self._model_class.plural)
-            log.debug("Removed row for %s", uid)
         except (RowDoesNotExist, KeyError):
             log.debug("Row %s does not exist in table", uid)
         except Exception as e:
@@ -652,25 +640,19 @@ class ResourceList(DataTable):
 
     def watch_visible_uids(self, old_uids: set[str], new_uids: set[str]) -> None:
         if new_uids == old_uids:
-            log.debug("New and Old UIDs sets are the same, skipping update.")
             return
+
+        self._get_column_width.cache_clear()
         if not new_uids:
-            log.debug("New UIDs set is empty, clearing table")
             self.clear()
             self.app.age_tracker.clear_resource_type(self._model_class.plural)
         elif not old_uids and new_uids == self.resources.keys():
-            log.debug(
-                "New visible UIDs set is the same as the resources keys, adding all rows"
-            )
             with self.app.batch_update():
                 for uid in self.resources:
                     self._add_row(self.resources[uid])
                 self._sort_rows()
                 self._update_table_layout()
         else:
-            log.debug(
-                "New and Old Visible UIDs sets are different, doing comparison and update"
-            )
             uids_to_remove = old_uids - new_uids
             uids_to_add = new_uids - old_uids
 
@@ -689,18 +671,59 @@ class ResourceList(DataTable):
         if self._model_class.__name__ == "PodRow":
             self.call_after_refresh(self._update_metrics)
 
-        # self.parent.post_message(VisibleUIDsChanged(new_uids))
-
-    def _get_sortable_value_from_row(
-        self, column_key: str | None, cell_value: Any
-    ) -> Any:
-        return _get_sortable_value_from_row(column_key, cell_value)
-
-
-    async def watch_selected_namespaces(self, selected_namespaces: list[str]) -> None:
+    async def watch_selected_namespaces(self, selected_namespaces: set[str]) -> None:
         """Watch the selected namespaces."""
-        self._watch_manager.namespaces = selected_namespaces
-        if future := self._watch_manager.current_update:
-            new_resources = await future
-            if new_resources:  # Only update if we got resources back
-                self.resources = {res.uid: res for res in new_resources}
+        log.info(f"Watching selected namespaces: {selected_namespaces}")
+
+        # If 'all' is selected, that's the only watch we need.
+        if "all" in selected_namespaces:
+            effective_selection = {"all"}
+        else:
+            effective_selection = selected_namespaces
+
+        # If nothing is selected, ensure resources are cleared and stop all watches.
+        if not selected_namespaces:
+            self.resources = {}
+            await self._watch_manager.stop()
+            return
+
+        current_watching = self._watch_manager.watching
+        namespaces_to_load = effective_selection
+
+        to_stop = current_watching - effective_selection
+        for ns in to_stop:
+            await self._watch_manager.stop_namespace_watch(ns)
+
+        to_start = effective_selection - current_watching
+
+        if not to_start and not to_stop:
+            return
+
+        # This will hold all resources from all namespaces being loaded.
+        all_resources_dict: dict[str, UIRow] = {}
+
+        for namespace in namespaces_to_load:
+            create_task = namespace in to_start
+            try:
+                (
+                    resource_generator,
+                    resource_version,
+                ) = await self._watch_manager.get_initial_list(namespace)
+            except (ApiException, ClientConnectorError, asyncio.TimeoutError) as e:
+                log.error(f"Error getting initial list for {namespace}: {e}")
+                self.app.notify(
+                    f"Failed to get resources for '{namespace}'. Please check your connection and permissions.",
+                    title="Error",
+                    severity="error",
+                    timeout=10,
+                )
+                break
+
+            # Consume the generator to populate the dictionary.
+            for res in resource_generator:
+                all_resources_dict[res.uid] = res
+
+            if create_task:
+                await self._watch_manager.create_watch_task(namespace, resource_version)
+
+        self.resources = all_resources_dict

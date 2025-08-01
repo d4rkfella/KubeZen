@@ -11,6 +11,7 @@ from .base import (
     ABC,
 )
 
+
 class BaseNetworkingV1Row(UIRow, ABC):
     """Base class for Networking V1 API resources."""
 
@@ -31,8 +32,6 @@ class IngressRow(BaseNetworkingV1Row):
     plural: ClassVar[str] = "ingresses"
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Ingresses"
-    list_method_name: ClassVar[str] = "list_ingress_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_ingress"
     index: ClassVar[int] = 1
 
     # --- Instance Fields ---
@@ -60,8 +59,6 @@ class IngressClassRow(BaseNetworkingV1Row):
     plural: ClassVar[str] = "ingressclasses"
     namespaced: ClassVar[bool] = False
     display_name: ClassVar[str] = "Ingress Classes"
-    list_method_name: ClassVar[str] = "list_ingress_class"
-    delete_method_name: ClassVar[str] = "delete_ingress_class"
     index: ClassVar[int] = 3
 
     # --- Instance Fields ---
@@ -88,8 +85,6 @@ class NetworkPolicyRow(BaseNetworkingV1Row):
     plural: ClassVar[str] = "networkpolicies"
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Network Policies"
-    list_method_name: ClassVar[str] = "list_network_policy_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_network_policy"
     index: ClassVar[int] = 2
 
     # --- Instance Fields ---

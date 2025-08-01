@@ -1,19 +1,12 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
 import logging
 import time
 
 from kubernetes_asyncio.client import V1Job, V1ObjectMeta
 
-from .base_action import BaseAction, supports_resources
-from KubeZen.models.batch import CronJobRow, JobRow
-from KubeZen.models.base import UIRow
+from KubeZen.actions.base_action import BaseAction, supports_resources
+from KubeZen.models.batch import CronJobRow
 from KubeZen.screens.input_screen import InputScreen, InputInfo
-
-if TYPE_CHECKING:
-    from KubeZen.app import KubeZenTuiApp
-    from KubeZen.models.base import UIRow
-
 
 log = logging.getLogger(__name__)
 
@@ -24,21 +17,10 @@ class TriggerCronJobAction(BaseAction):
 
     name = "Trigger"
 
-    async def execute(self, row_info: UIRow) -> None:
+    async def execute(self, row_info: CronJobRow) -> None:
         """Shows an input screen to get a name for the new Job and triggers it."""
 
         default_job_name = f"{row_info.name}-{int(time.time())}"
-
-        def on_submit(results: dict[str, str] | None) -> None:
-            if not results:
-                return
-
-            job_name = results.get("job_name", default_job_name)
-            if not job_name:
-                self.app.notify("Job name cannot be empty.", severity="error")
-                return
-
-            self.app.run_worker(self._trigger_job(job_name))
 
         inputs = [
             InputInfo(
@@ -48,15 +30,22 @@ class TriggerCronJobAction(BaseAction):
             )
         ]
 
-        self.app.push_screen(
+        results = await self.app.push_screen_wait(
             InputScreen(
                 title=f"Trigger CronJob: {row_info.name}",
                 inputs=inputs,
-            ),
-            on_submit,
+            )
         )
 
-    async def _trigger_job(self, job_name: str) -> None:
+        if results is None:
+            self.app.notify("Action cancelled.", severity="error")
+            return
+
+        job_name = results.get("job_name") or default_job_name
+
+        await self._trigger_job(row_info, job_name)
+
+    async def _trigger_job(self, row_info: CronJobRow, job_name: str) -> None:
         """Creates a Job from the CronJob's template."""
         try:
             cronjob = row_info.raw
@@ -108,11 +97,11 @@ class SuspendCronJobAction(BaseAction):
 
     name = "Suspend"
 
-    def can_perform(self, row_info: UIRow) -> bool:
+    def can_perform(self, row_info: CronJobRow) -> bool:
         """Only allow suspending if the CronJob is not already suspended."""
         return not row_info.raw.spec.suspend
 
-    async def execute(self, row_info: UIRow) -> None:
+    async def execute(self, row_info: CronJobRow) -> None:
         """Suspend the CronJob by setting spec.suspend to True."""
         try:
             log.debug(f"Suspending CronJob '{row_info.name}'")
@@ -134,16 +123,16 @@ class SuspendCronJobAction(BaseAction):
 
 
 @supports_resources("cronjobs")
-class ResumeCronJobAction(BaseAction):
+class ResumeCronJobAction(BaseAction[CronJobRow]):
     """An action to resume a CronJob."""
 
     name = "Resume"
 
-    def can_perform(self, row_info: UIRow) -> bool:
+    def can_perform(self, row_info: CronJobRow) -> bool:
         """Only allow resuming if the CronJob is suspended."""
         return bool(row_info.raw.spec.suspend)
 
-    async def execute(self, row_info: UIRow) -> None:
+    async def execute(self, row_info: CronJobRow) -> None:
         """Resume the CronJob by setting spec.suspend to False."""
         try:
             log.debug(f"Resuming CronJob '{row_info.name}'")

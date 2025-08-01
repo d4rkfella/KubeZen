@@ -14,16 +14,17 @@ requires-python = ">=3.12"
 
 dependencies = [
     "click==8.2.1",
-    "textual==3.6.0",
+    "textual==5.1.1",
     "libtmux==0.46.2",
     "kubernetes_asyncio==32.3.2",
-    "yappi",
     "dpath==2.2.0",
-    "humanize",
     "jsonpath-ng==1.7.0",
-    "pyyaml",
-    "orjson==3.10.18",
+    "orjson==3.11.1",
     "croniter==6.0.0",
+    "ciso8601==2.3.2",
+    "PyYAML==6.0.2",
+    "textual-speedups",
+    "textual[syntax]",
 ]
 
 [project.scripts]

@@ -1,25 +1,14 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any, Type
 import re
 
 from textual import on
-from textual.events import Load, Mount
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.widgets import ListView, ListItem, Static, Label
 from textual.containers import Container
 from textual.events import Click
-from textual.reactive import reactive
-from typing import cast
-import importlib
-import pkgutil
-import inspect
 
-from KubeZen.actions.base_action import BaseAction
 from KubeZen.models.base import UIRow
-
-if TYPE_CHECKING:
-    from KubeZen.app import KubeZenTuiApp
 
 import logging
 
@@ -28,8 +17,6 @@ log = logging.getLogger(__name__)
 
 class ActionScreen(ModalScreen[None]):
     """A modal screen that displays a list of available actions for a resource."""
-
-    app: "KubeZenTuiApp"  # type: ignore[assignment]
 
     BINDINGS = [("escape", "dismiss", "Dismiss")]
 
@@ -41,7 +28,7 @@ class ActionScreen(ModalScreen[None]):
     #modal-container {
         width: 60;
         height: auto;
-        border: thick $primary;
+        border: round $primary;
         background: $boost;
     }
 
@@ -92,6 +79,13 @@ class ActionScreen(ModalScreen[None]):
         if selected_action:
             self.dismiss(None)
             self.app.run_worker(selected_action.execute(self.row_info))
-    
+
     def __del__(self) -> None:
         log.debug("Action screen destroyed")
+
+    @on(Click)
+    def dismiss_on_click_outside(self, event: Click) -> None:
+        """Dismisses the screen when clicking outside the modal container."""
+        modal_container = self.query_one("#modal-container")
+        if not modal_container.region.contains(event.screen_x, event.screen_y):
+            self.dismiss()

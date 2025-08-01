@@ -1,5 +1,4 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
 import shlex
 import tempfile
 import logging
@@ -10,9 +9,6 @@ from KubeZen.models.apps import DeploymentRow, StatefulSetRow, DaemonSetRow
 from KubeZen.models.core import PodRow
 from KubeZen.screens.log_options_screen import ALL_CONTAINERS_CODE, LogOptionsScreen
 
-
-if TYPE_CHECKING:
-    from KubeZen.app import KubeZenTuiApp
 
 log = logging.getLogger(__name__)
 
@@ -28,17 +24,9 @@ class ViewLogsAction(BaseAction):
     async def execute(self, row_info: UIRow) -> None:
         self._row_info = row_info
 
-        """Shows log options screen and then shows the logs."""
-
-        def on_select(options: dict | None) -> None:
-            if options:
-                self.app.run_worker(
-                    self._show_logs(options, ALL_CONTAINERS_CODE),
-                    thread=True,
-                    exclusive=True,
-                )
-
-        await self.app.push_screen(LogOptionsScreen(self._row_info), on_select)
+        results = await self.app.push_screen_wait(LogOptionsScreen(self._row_info))
+        if results:
+            await self._show_logs(results, ALL_CONTAINERS_CODE)
 
     async def _show_logs(self, options: dict, all_containers_code: str) -> None:
         """Constructs and executes the final kubectl logs command with a pager."""
@@ -59,7 +47,7 @@ class ViewLogsAction(BaseAction):
                 )
                 if total_containers > 1:
                     parts.append("--all-containers=true")
-        
+
         elif isinstance(self._row_info, (DeploymentRow, StatefulSetRow, DaemonSetRow)):
             match_labels = self._row_info.raw.spec.selector.match_labels
             selector = ",".join([f"{k}={v}" for k, v in match_labels.items()])
@@ -92,15 +80,13 @@ class ViewLogsAction(BaseAction):
         cmd_str = " ".join(shlex.quote(part) for part in parts)
 
         full_command = (
-            f"{cmd_str} | tee {shlex.quote(log_file_path)} | less {less_options}; "
+            f"{cmd_str} > {shlex.quote(log_file_path)}; "
+            f"less {less_options} {shlex.quote(log_file_path)}; "
             f"rm {shlex.quote(log_file_path)}"
         )
 
         await self.app.tmux_manager.launch_command_in_new_window(
             command=full_command,
             window_name=window_name,
-            attach=True,
-            key_bindings={
-                "f2": f"bin/fzf_log_search.sh {shlex.quote(log_file_path)}"
-            },
+            env_vars={"LOGFILE": log_file_path},
         )

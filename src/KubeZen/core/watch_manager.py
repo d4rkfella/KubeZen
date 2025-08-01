@@ -1,30 +1,34 @@
 """Watch multiple K8s event streams without threads."""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Callable, Literal, Type
+from typing import TYPE_CHECKING, Callable, Type, Generator
 import asyncio
-from types import SimpleNamespace
+import socket
 import logging
-import re
-import orjson as json
 
 from kubernetes_asyncio import watch
 from kubernetes_asyncio.client.exceptions import ApiException
-
 from textual.signal import Signal
 
+from aiohttp import (
+    ClientConnectorError,
+    ClientOSError,
+    ServerDisconnectedError,
+    ClientPayloadError,
+)
+
 if TYPE_CHECKING:
-    from ..app import KubeZenTuiApp
+    from ..app import KubeZen
     from ..models.base import UIRow
 
 log = logging.getLogger(__name__)
 
 
 class WatchManagerSignal:
-    def __init__(self, app: KubeZenTuiApp, model_class: Type[UIRow]):
+    def __init__(self, app: KubeZen, model_class: Type[UIRow]):
         kind: str = model_class.kind.lower()
         self._resource_added: Signal[dict[str, UIRow]] = Signal(
-            app,f"resource_added_{kind}"
+            app, f"resource_added_{kind}"
         )
         self._resource_modified: Signal[dict[str, UIRow]] = Signal(
             app, f"resource_modified_{kind}"
@@ -32,10 +36,12 @@ class WatchManagerSignal:
         self._resource_deleted: Signal[dict[str, UIRow]] = Signal(
             app, f"resource_deleted_{kind}"
         )
+        self._resource_full_reset: Signal[dict[str, UIRow]] = Signal(
+            app, f"resource_full_reset_{kind}"
+        )
 
     def __del__(self):
-        log.debug(f"Deleting watch manager signal")
-        log.debug({self._resource_added})
+        log.debug("Deleting watch manager signal")
 
     @property
     def resource_added(self) -> Signal[dict[str, UIRow]]:
@@ -49,90 +55,45 @@ class WatchManagerSignal:
     def resource_deleted(self) -> Signal[dict[str, UIRow]]:
         return self._resource_deleted
 
+    @property
+    def resource_full_reset(self) -> Signal[list[UIRow]]:
+        return self._resource_full_reset
+
 
 class WatchManager:
-    def __init__(
-        self, app: "KubeZenTuiApp", model_class: type[UIRow]
-    ):
+    def __init__(self, app: "KubeZen", model_class: type[UIRow]):
         self._model_class = model_class
         self._api_client = app.kubernetes_client
-        self._namespaces: list[str] | None = []
         self._tasks: dict[str, asyncio.Task] = {}
         self._signals = WatchManagerSignal(app, model_class)
-        self._current_update: asyncio.Future[list[UIRow]] | None = None
-
-    @property
-    def namespaces(self) -> list[str] | Literal["all"]:
-        """Getter for the current list of namespaces."""
-        return self._namespaces
-
-    @namespaces.setter
-    def namespaces(self, new_namespaces: list[str]) -> None:
-        """
-        Intelligently updates watches based on the difference between the old
-        and new list of namespaces.
-        """
-        new_set = set(new_namespaces)
-        old_set = set(self._namespaces)
-
-        if old_set == new_set:
-            # No change needed, set an empty result
-            self._current_update = asyncio.Future()
-            self._current_update.set_result([])
-            return
-
-        # First stop all existing watches if switching between "all" and specific namespaces
-        if ("all" in new_set) != ("all" in old_set):
-            for task in self._tasks.values():
-                task.cancel()
-            self._tasks.clear()
-        else:
-            # Otherwise, stop watches for removed namespaces
-            for ns in (old_set - new_set):
-                if task := self._tasks.pop(ns, None):
-                    task.cancel()
-
-        self._namespaces = new_namespaces
-
-        # Start new watches and get initial items
-        if "all" in new_namespaces:
-            # Special case: watching all namespaces
-            async def _watch_all():
-                items, rv = await self._get_initial_list_for("all")
-                self._tasks["all"] = asyncio.create_task(self._run_watch_for("all", rv))
-                return items
-            self._current_update = asyncio.create_task(_watch_all())
-        else:
-            # Watch specific namespaces
-            async def _watch_namespaces():
-                # Get items for all specified namespaces, not just new ones
-                all_items = []
-                for namespace in new_namespaces:
-                    items, rv = await self._get_initial_list_for(namespace)
-                    all_items.extend(items)
-                    # Only start a new watch if we don't already have one
-                    if namespace not in self._tasks:
-                        self._tasks[namespace] = asyncio.create_task(self._run_watch_for(namespace, rv))
-                return all_items
-            self._current_update = asyncio.create_task(_watch_namespaces())
-
-    @property
-    def current_update(self) -> asyncio.Future[list[UIRow]] | None:
-        """Get the Future for the current namespace update operation."""
-        if self._current_update and self._current_update.done():
-            # Clear the update once it's been completed
-            self._current_update = None
-        return self._current_update
 
     async def stop(self) -> None:
         """Stops all running watch tasks gracefully."""
         if not self._tasks:
             return
-        tasks = list(self._tasks.values())
+        tasks = set(self._tasks.values())
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+
+    async def stop_namespace_watch(self, namespace: str) -> None:
+        """Stops the watch task for a specific namespace."""
+        if namespace in self._tasks:
+            task = self._tasks.pop(namespace)
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    log.debug(
+                        "Successfully cancelled watch for namespace '%s'.", namespace
+                    )
+
+    @property
+    def watching(self) -> set[str]:
+        """Returns a list of namespaces currently being watched."""
+        return set(self._tasks.keys())
 
     def _get_api_call_info(self, namespace: str) -> tuple[Callable, dict]:
         """
@@ -145,164 +106,162 @@ class WatchManager:
             namespace=namespace,
         )
 
-    async def _get_initial_list_for(self, namespace: str) -> tuple[list[UIRow], str]:
-        """Performs a LIST and returns resources and resource_version for a namespace."""
+    async def get_initial_list(
+        self, namespace: str
+    ) -> tuple[Generator[UIRow, None, None], str]:
+        """
+        Performs a LIST and returns a generator for the resources and the
+        resource_version for a namespace.
+        """
         list_call, list_kwargs = self._get_api_call_info(namespace)
-        response = await list_call(**list_kwargs)
+        try:
+            response = await list_call(**list_kwargs)
+        except (ApiException, ClientConnectorError) as e:
+            log.error(f"Error getting initial list for {namespace}: {e}")
+            raise
 
-        # Handle the different response structures for standard vs. custom resources
+        # Determine the items list and resource version based on response type
         if self._model_class.api_info.client_name == "CustomObjectsApi":
-            # For CRDs, the response is a dictionary. The items are also dictionaries.
-            # We convert them to SimpleNamespace to allow dot-notation access in the UIRow models.
-            items = []
-            for item in response.get("items", []):
-                items.append(self._model_class(raw=item))
+            items_list = response.get("items", [])
             resource_version = response.get("metadata", {}).get("resourceVersion", "")
         else:
-            # For standard resources, the response is a model object (e.g., V1PodList)
-            items = [self._model_class(raw=item) for item in response.items]
+            items_list = response.items
             resource_version = response.metadata.resource_version
 
-        return items, resource_version
+        def resource_generator() -> Generator[UIRow, None, None]:
+            """A generator that yields model instances one by one."""
+            for item in items_list:
+                yield self._model_class(raw=item)
 
-    async def _run_watch_for(self, namespace: str, resource_version: str) -> None:
-        """The core watch loop for a specific namespace or all namespaces."""
+        return resource_generator(), resource_version
+
+    async def create_watch_task(self, namespace: str, resource_version: str) -> None:
+        """Creates a watch task for a specific namespace and resource version."""
+        if namespace in self._tasks and not self._tasks[namespace].done():
+            log.info("Replacing existing watch task for namespace '%s'", namespace)
+            self._tasks[namespace].cancel()
+            try:
+                await self._tasks[namespace]
+            except asyncio.CancelledError:
+                log.debug("Successfully cancelled existing watch for '%s'.", namespace)
+
+        log.info(
+            "Creating new watch task for namespace '%s' at RV %s",
+            namespace,
+            resource_version,
+        )
+        self._tasks[namespace] = asyncio.create_task(
+            self._start_watch(namespace, resource_version)
+        )
+
+    async def _start_watch(self, namespace: str, resource_version: str) -> None:
+        """The core watch loop using the high-level Watch class, with per-event timeout."""
         current_rv = resource_version
 
-        # This outer loop ensures the watch is persistent and reconnects on errors or timeouts.
         while True:
-            response = None
             try:
-                watch_call, watch_kwargs = self._get_api_call_info(namespace)
-                watch_kwargs["resource_version"] = current_rv
-                watch_kwargs["allow_watch_bookmarks"] = True
-                watch_kwargs["_preload_content"] = False
-                watch_kwargs["watch"] = True
-                watch_kwargs["timeout_seconds"] = 240  # A reasonable timeout to ensure reconnections
-
-                # The response type for deserialization, e.g. "V1Pod"
-                version = self._model_class.api_info.version.capitalize()
-                kind = self._model_class.kind
-                response_type = f"{version}{kind}"
+                list_call, list_kwargs = self._get_api_call_info(namespace)
+                list_kwargs["resource_version"] = current_rv
+                list_kwargs["allow_watch_bookmarks"] = True
+                list_kwargs["timeout_seconds"] = 240
 
                 log.info(
                     "Starting watch for %s in namespace '%s' from RV: %s",
-                    self._model_class.kind,
+                    self._model_class.plural,
                     namespace,
                     current_rv,
                 )
 
-                # Use the underlying API call to get the raw response
-                response = await watch_call(**watch_kwargs)
+                watch_handler = watch.Watch()
+                async with watch_handler.stream(list_call, **list_kwargs) as stream:
+                    while True:
+                        try:
+                            event = await asyncio.wait_for(
+                                stream.__anext__(), timeout=65
+                            )
+                        except asyncio.TimeoutError:
+                            log.warning(
+                                "Watch timed out due to inactivity (possible network loss). Reconnecting..."
+                            )
+                            break  # Exit inner loop to reconnect
+                        except StopAsyncIteration:
+                            log.info("Watch stream closed by API server after timeout_seconds.")
+                            break
 
-                while True:
-                    try:
-                        line = await response.content.readline()
-                        if not line:
-                            log.info(
-                                "Watch connection closed by server for %s in ns '%s'. Reconnecting from RV: %s",
-                                self._model_class.kind,
-                                namespace,
+                        if watch_handler.resource_version:
+                            current_rv = watch_handler.resource_version
+
+                        event_type = event["type"]
+                        k8s_object = event["object"]
+
+                        if event_type == "BOOKMARK":
+                            log.debug(
+                                "Received BOOKMARK, updating resource_version to %s",
                                 current_rv,
                             )
-                            break  # End of inner stream-reading loop to reconnect
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        log.warning(
-                            "Error reading from watch stream for %s in ns '%s': %s. Reconnecting.",
-                            self._model_class.kind,
-                            namespace,
-                            e,
-                        )
-                        break
+                            continue
 
-                    event = json.loads(line)
+                        model_instance = self._model_class(raw=k8s_object)
+                        event_data = {"resource": model_instance}
 
-                    if event["type"] == "BOOKMARK":
-                        current_rv = event["object"]["metadata"]["resourceVersion"]
-                        log.info(
-                            "BOOKMARK event for %s in NS '%s', updating RV to %s",
-                            self._model_class.kind,
-                            namespace,
-                            current_rv,
-                        )
-                        continue
-
-                    # The deserialize method expects a response-like object with a `data` attribute
-                    data_to_deserialize = SimpleNamespace(
-                        data=json.dumps(event["object"])
-                    )
-                    deserialized_object = self._api_client.client.deserialize(
-                        data_to_deserialize, response_type
-                    )
-                    model_instance = self._model_class(raw=deserialized_object)
-
-                    log.info(
-                        "Watch received event: %s for %s '%s' in NS '%s'",
-                        event["type"],
-                        self._model_class.kind,
-                        model_instance.name,
-                        namespace,
-                    )
-                    event_data = {"resource": model_instance}
-                    if event["type"] == "ADDED":
-                        self._signals.resource_added.publish(event_data)
-                    elif event["type"] == "MODIFIED":
-                        self._signals.resource_modified.publish(event_data)
-                    elif event["type"] == "DELETED":
-                        self._signals.resource_deleted.publish(event_data)
-
-            except asyncio.CancelledError:
-                log.info(
-                    "Watch permanently cancelled for %s in namespace '%s'.",
-                    self._model_class.kind,
-                    namespace,
-                )
-                break  # Exit the outer persistence loop
+                        if event_type == "ADDED":
+                            self._signals.resource_added.publish(event_data)
+                        elif event_type == "MODIFIED":
+                            self._signals.resource_modified.publish(event_data)
+                        elif event_type == "DELETED":
+                            self._signals.resource_deleted.publish(event_data)
 
             except ApiException as e:
                 if e.status == 410:
                     log.warning(
-                        "Resource version %s for %s in ns '%s' is too old. Re-listing to get a fresh start.",
+                        "Watch RV %s for %s in ns '%s' is too old. Re-listing.",
                         current_rv,
                         self._model_class.kind,
                         namespace,
                     )
                     try:
-                        # Re-list to get the latest state and a new, valid resource version
-                        _items, new_rv = await self._get_initial_list_for(namespace)
+                        _items, new_rv = await self.get_initial_list(namespace)
                         current_rv = new_rv
                         log.info(
-                            "Successfully re-listed. Restarting watch for %s in ns '%s' from new RV: %s",
+                            "Re-listed. Restarting watch for %s in ns '%s' from RV: %s",
                             self._model_class.kind,
                             namespace,
                             new_rv,
                         )
-                    except Exception as exc:
+                        self._signals.resource_full_reset.publish(_items)
+                        continue
+                    except Exception as relist_exc:
                         log.exception(
-                            "Failed to re-list after 410 error for %s in ns '%s'. Retrying in 5 seconds. Error: %s",
-                            self._model_class.kind,
-                            namespace,
-                            exc,
+                            "Failed to re-list after 410. Retrying in 15s.",
+                            exc_info=relist_exc,
                         )
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(15)
+                        continue
                 else:
                     log.exception(
-                        "API error in watch loop for %s in namespace '%s'. Reconnecting in 5 seconds.",
+                        "API error in watch loop for %s, retrying in 15s.",
                         self._model_class.kind,
-                        namespace,
+                        exc_info=e,
                     )
-                    await asyncio.sleep(5)
-            finally:
-                # Ensure the response is closed before the next reconnection attempt
-                if response:
-                    try:
-                        response.close()
-                    except Exception as e:
-                        log.debug(
-                            "Error closing response stream, may already be closed: %s", e
-                        )
+                    await asyncio.sleep(15)
+                    continue
+            except asyncio.CancelledError:
+                # Task was cancelled, exit cleanly
+                log.debug("Watch task for %s in ns '%s' was cancelled", self._model_class.kind, namespace)
+                break
+            except (
+                ClientConnectorError,
+                ClientOSError,
+                ServerDisconnectedError,
+                ClientPayloadError,
+                socket.gaierror,
+                OSError,
+            ) as net_exc:
+                log.warning(
+                    "Client-side network error: %s — reconnecting in 10s.", net_exc
+                )
+                await asyncio.sleep(10)
+                continue
 
     @property
     def signals(self) -> WatchManagerSignal:

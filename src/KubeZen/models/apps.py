@@ -11,7 +11,7 @@ from .base import (
     CATEGORIES,
 )
 from kubernetes_asyncio.client import V1Deployment
-from typing import cast
+
 
 @dataclass(frozen=True)
 class BaseAppsV1Row(UIRow, ABC):
@@ -89,9 +89,6 @@ class DaemonSetRow(BaseAppsV1Row):
     plural: ClassVar[str] = "daemonsets"
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Daemon Sets"
-    list_method_name: ClassVar[str] = "list_daemon_set_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_daemon_set"
-    patch_method_name: ClassVar[str] = "patch_namespaced_daemon_set"
     index: ClassVar[int] = 2
 
     # --- Instance Fields ---
@@ -129,9 +126,6 @@ class ReplicaSetRow(BaseAppsV1Row):
     plural: ClassVar[str] = "replicasets"
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Replica Sets"
-    list_method_name: ClassVar[str] = "list_replica_set_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_replica_set"
-    patch_method_name: ClassVar[str] = "patch_namespaced_replica_set"
     index: ClassVar[int] = 4
 
     # --- Instance Fields ---
@@ -160,13 +154,11 @@ class StatefulSetRow(BaseAppsV1Row):
     plural: ClassVar[str] = "statefulsets"
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Stateful Sets"
-    list_method_name: ClassVar[str] = "list_stateful_set_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_stateful_set"
-    patch_method_name: ClassVar[str] = "patch_namespaced_stateful_set"
     index: ClassVar[int] = 5
 
     # --- Instance Fields ---
     ready: str = column_field(label="Ready", width=10)
+    replicas: str = column_field(label="Replicas", width=10)
 
     def __init__(self, raw: Any):
         """Initialize the stateful set row with data from the raw Kubernetes resource."""
@@ -179,4 +171,7 @@ class StatefulSetRow(BaseAppsV1Row):
                 if self.raw.status.replicas
                 else "0/0"
             ),
+        )
+        object.__setattr__(
+            self, "replicas", self.raw.spec.replicas if self.raw.spec.replicas else "0"
         )

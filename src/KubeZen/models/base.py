@@ -3,14 +3,26 @@ from __future__ import annotations
 import logging
 from abc import abstractmethod, ABCMeta, ABC
 from dataclasses import dataclass, field, fields
-from datetime import datetime, timezone
-from typing import Any, ClassVar, Optional, Dict, Type
+from datetime import datetime
+from typing import Any, ClassVar, Optional, Dict
+from functools import lru_cache
 
 from jsonpath_ng import JSONPath
 from jsonpath_ng.exceptions import JsonPathParserError
 from jsonpath_ng.ext import parse as jsonpath_parse
 
+import ciso8601
+
+
 log = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=256)
+def _get_cached_jsonpath_expression(path: str) -> JSONPath:
+    """Compiles and caches a JSONPath expression string."""
+    log.debug(f"[JSONPath] Compiling and caching expression: '{path}'")
+    return jsonpath_parse(path)
+
 
 class ModelMeta(ABCMeta):
     """
@@ -39,9 +51,6 @@ class ModelMeta(ABCMeta):
             "api_info",
         ]
 
-        # Cache for compiled jsonpath expressions
-        cls._jsonpath_expressions = {}
-
         for attr in required_attrs:
             if not hasattr(cls, attr):
                 raise TypeError(
@@ -61,19 +70,20 @@ class Category:
 
 
 _CATEGORIES_LIST = [
-    Category(name="Nodes", icon="🗄️", index=0),
+    Category(name="Nodes", icon="🗄 ", index=0),
     Category(name="Workloads", icon="🚢", index=1),
-    Category(name="Config", icon="⚙️", index=2),
+    Category(name="Config", icon="⚙ ", index=2),
     Category(name="Network", icon="🌐", index=3),
     Category(name="Storage", icon="💾", index=4),
-    Category(name="Namespaces", icon="🏷️", index=5),
+    Category(name="Namespaces", icon="🏷 ", index=5),
     Category(name="Helm", icon="☸️", index=6),
-    Category(name="Access Control", icon="🛡️", index=7),
+    Category(name="Access Control", icon="🛡 ", index=7),
     Category(name="Events", icon="🕘", index=8),
     Category(name="Custom Resources", icon="🧩", index=9),
 ]
 
 CATEGORIES: Dict[str, Category] = {cat.name: cat for cat in _CATEGORIES_LIST}
+
 
 @dataclass(frozen=True)
 class ApiInfo:
@@ -216,7 +226,6 @@ class UIRow(ABC, metaclass=ModelMeta):
     category: ClassVar[str]
     index: ClassVar[int]
     omit_name_column: ClassVar[bool] = False
-    _jsonpath_expressions: ClassVar[Dict[str, JSONPath]] = {}
 
     raw: Any = field(repr=False, compare=False)
     uid: str = field(init=False, repr=False, compare=False)
@@ -293,7 +302,9 @@ class UIRow(ABC, metaclass=ModelMeta):
             if isinstance(metadata, dict)
             else getattr(metadata, "creation_timestamp", None)
         )
-        object.__setattr__(self, "age", self.to_datetime(age))
+        if isinstance(age, str):
+            age = UIRow.to_datetime(age)
+        object.__setattr__(self, "age", age)
 
     def _resolve_path(self, obj: Any, path: str) -> Any:
         """
@@ -317,11 +328,7 @@ class UIRow(ABC, metaclass=ModelMeta):
         # Complex path using jsonpath-ng
         log.debug(f"[JSONPath] Complex lookup for path: '{path}'")
         try:
-            expression = self.__class__._jsonpath_expressions.get(path)
-            if expression is None:
-                expression = jsonpath_parse(path)
-                self.__class__._jsonpath_expressions[path] = expression
-                log.debug(f"[JSONPath] Compiled and cached expression: '{path}'")
+            expression = _get_cached_jsonpath_expression(path)
 
             matches = expression.find(obj)
             if matches:
@@ -336,6 +343,7 @@ class UIRow(ABC, metaclass=ModelMeta):
             return None
 
     @classmethod
+    @lru_cache(maxsize=32)
     def get_columns(cls) -> list[dict[str, Any]]:
         """
         Inspects the dataclass fields to find columns and their metadata.
@@ -372,12 +380,14 @@ class UIRow(ABC, metaclass=ModelMeta):
         return start_columns + middle_columns + end_columns
 
     @classmethod
+    @lru_cache(maxsize=32)
     def get_column_keys(cls) -> list[str]:
         """Get the list of column keys for the model."""
         columns = cls.get_columns()
         return [c["key"] for c in columns] if columns else []
 
     @classmethod
+    @lru_cache(maxsize=32)
     def get_time_tracked_fields(cls) -> dict[Any, str]:
         """Get the list of time-tracked fields for the model."""
         columns = cls.get_columns()
@@ -388,29 +398,9 @@ class UIRow(ABC, metaclass=ModelMeta):
         }
 
     @staticmethod
-    def to_datetime(timestamp: Any) -> datetime | None:
-        """
-        Safely converts a timestamp from various formats (str, int, datetime)
-        into a timezone-aware datetime object. Returns None if conversion fails.
-        """
-        if isinstance(timestamp, datetime):
-            if timestamp.tzinfo is None:
-                return timestamp.replace(tzinfo=timezone.utc)
-            return timestamp
-        if isinstance(timestamp, int):
-            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
-        if isinstance(timestamp, str):
-            try:
-                if timestamp.endswith("Z"):
-                    timestamp = timestamp[:-1] + "+00:00"
-                dt_obj = datetime.fromisoformat(timestamp)
-                if dt_obj.tzinfo is None:
-                    dt_obj = dt_obj.replace(tzinfo=timezone.utc)
-                return dt_obj
-            except (ValueError, TypeError):
-                log.warning(f"Could not parse timestamp string: '{timestamp}'")
-                return None
-        return None
+    @lru_cache(maxsize=1024)
+    def to_datetime(timestamp: Any) -> datetime:
+        return ciso8601.parse_datetime(timestamp)
 
     @staticmethod
     def format_datetime_string(ts_str: str | None) -> str:
@@ -422,14 +412,7 @@ class UIRow(ABC, metaclass=ModelMeta):
         return dt_object.strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
-    def format_age(creation_ts: datetime, now: Optional[datetime] = None) -> str:
-        if now is None:
-            now = datetime.now(timezone.utc)
-
-        # Ensure creation_ts is timezone-aware for correct comparison
-        if creation_ts.tzinfo is None:
-            creation_ts = creation_ts.replace(tzinfo=timezone.utc)
-
+    def format_age(creation_ts: datetime, now: datetime) -> str:
         age_delta = now - creation_ts
         total_seconds = int(age_delta.total_seconds())
 
@@ -457,14 +440,8 @@ class UIRow(ABC, metaclass=ModelMeta):
             return f"{total_days}d"
 
     @staticmethod
-    def format_countdown(future_ts: datetime, now: Optional[datetime] = None) -> str:
+    def format_countdown(future_ts: datetime, now: datetime) -> str:
         """Formats a future datetime into a countdown string like 'in 5m'."""
-        if now is None:
-            now = datetime.now(timezone.utc)
-
-        if future_ts.tzinfo is None:
-            future_ts = future_ts.replace(tzinfo=timezone.utc)
-
         delta = future_ts - now
         total_seconds = int(delta.total_seconds())
 

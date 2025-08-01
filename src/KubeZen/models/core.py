@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from .base import (
+from KubeZen.models.base import (
     UIRow,
     CATEGORIES,
     core_v1_api,
@@ -12,9 +12,8 @@ from .base import (
 )
 from rich.text import Text
 from rich.markup import escape
-from typing import cast
-from kubernetes_asyncio.client import V1Pod, V1ContainerStatus
-from ..utils import sanitize_timestamp_str
+from kubernetes_asyncio.client import V1ContainerStatus
+from KubeZen.utils import sanitize_timestamp_str
 
 
 class BaseCoreV1Row(UIRow, ABC):
@@ -122,8 +121,6 @@ class NamespaceRow(BaseCoreV1Row):
     namespaced: ClassVar[bool] = False
     display_name: ClassVar[str] = "Namespaces"
     category: ClassVar[str] = CATEGORIES["Namespaces"].name
-    list_method_name: ClassVar[str] = "list_namespace"
-    delete_method_name: ClassVar[str] = "delete_namespace"
     index: ClassVar[int] = 1
 
     # --- Instance Fields ---
@@ -146,8 +143,6 @@ class EventRow(BaseCoreV1Row):
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Events"
     category: ClassVar[str] = CATEGORIES["Events"].name
-    list_method_name: ClassVar[str] = "list_event_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_event"
     index: ClassVar[int] = 0
     omit_name_column: ClassVar[bool] = True
 
@@ -158,9 +153,7 @@ class EventRow(BaseCoreV1Row):
     source: str = column_field(label="Source", width=20)
     count: int = column_field(label="Count", width=5)
     age: str = column_field(label="Age", width=10, is_age=True)
-    last_seen: str = column_field(
-        label="Last Seen", width=10, is_age=True
-    )
+    last_seen: str = column_field(label="Last Seen", width=10, is_age=True)
 
     def __init__(self, raw: Any):
         """Initialize the event row with data from the raw Kubernetes resource."""
@@ -195,8 +188,6 @@ class ConfigMapRow(BaseCoreV1Row):
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Config Maps"
     category: ClassVar[str] = CATEGORIES["Config"].name
-    list_method_name: ClassVar[str] = "list_config_map_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_config_map"
     index: ClassVar[int] = 0
 
     # --- Instance Fields ---
@@ -217,8 +208,6 @@ class SecretRow(BaseCoreV1Row):
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Secrets"
     category: ClassVar[str] = CATEGORIES["Config"].name
-    list_method_name: ClassVar[str] = "list_secret_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_secret"
     index: ClassVar[int] = 1
 
     # --- Instance Fields ---
@@ -239,8 +228,6 @@ class ServiceAccountRow(BaseCoreV1Row):
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Service Accounts"
     category: ClassVar[str] = CATEGORIES["Access Control"].name
-    list_method_name: ClassVar[str] = "list_service_account_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_service_account"
     index: ClassVar[int] = 0
 
     # --- Instance Fields ---
@@ -261,8 +248,6 @@ class ServiceRow(BaseCoreV1Row):
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Services"
     category: ClassVar[str] = CATEGORIES["Network"].name
-    list_method_name: ClassVar[str] = "list_service_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_service"
     index: ClassVar[int] = 0
 
     # --- Instance Fields ---
@@ -303,8 +288,6 @@ class ResourceQuotaRow(BaseCoreV1Row):
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Resource Quotas"
     category: ClassVar[str] = CATEGORIES["Config"].name
-    list_method_name: ClassVar[str] = "list_resource_quota_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_resource_quota"
     index: ClassVar[int] = 2
 
     # --- Instance Fields ---
@@ -355,8 +338,6 @@ class PersistentVolumeClaim(BaseCoreV1Row):
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Persistent Volume Claims"
     category: ClassVar[str] = CATEGORIES["Storage"].name
-    list_method_name: ClassVar[str] = "list_persistent_volume_claim_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_persistent_volume_claim"
     index: ClassVar[int] = 1
 
     # --- Instance Fields ---
@@ -387,8 +368,6 @@ class LimitRangeRow(BaseCoreV1Row):
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Limit Ranges"
     category: ClassVar[str] = CATEGORIES["Config"].name
-    list_method_name: ClassVar[str] = "list_limit_range_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_limit_range"
     index: ClassVar[int] = 3
 
     # --- Instance Fields ---
@@ -404,13 +383,11 @@ class Endpoint(BaseCoreV1Row):
     """Represents an Endpoint for UI display."""
 
     # --- API Metadata ---
-    kind: ClassVar[str] = "Endpoint"
+    kind: ClassVar[str] = "Endpoints"
     plural: ClassVar[str] = "endpoints"
     namespaced: ClassVar[bool] = True
     display_name: ClassVar[str] = "Endpoints"
     category: ClassVar[str] = CATEGORIES["Network"].name
-    list_method_name: ClassVar[str] = "list_endpoints_for_all_namespaces"
-    delete_method_name: ClassVar[str] = "delete_namespaced_endpoint"
     index: ClassVar[int] = 4
 
     # --- Instance Fields ---
@@ -446,6 +423,7 @@ class Endpoint(BaseCoreV1Row):
 
         return ", ".join(formatted_endpoints)
 
+
 @dataclass(frozen=True)
 class PodRow(BaseCoreV1Row):
     """A data class representing the view model for a Kubernetes Pod."""
@@ -468,7 +446,6 @@ class PodRow(BaseCoreV1Row):
     age: str = column_field(label="Age", width=5, is_age=True)
     status: str = column_field(label="Status", width=10)
 
-
     def __init__(self, raw: UIRow):
         """Initialize the pod row with data from the raw Kubernetes resource."""
         super().__init__(raw=raw)
@@ -480,7 +457,6 @@ class PodRow(BaseCoreV1Row):
         object.__setattr__(self, "controlled_by", self._format_controlled_by_status())
         object.__setattr__(self, "cpu", "")
         object.__setattr__(self, "memory", "")
-
 
     def _get_restarts(self) -> int:
         """Calculates the total number of container restarts."""
@@ -550,7 +526,6 @@ class PodRow(BaseCoreV1Row):
         # 5. Fallback to phase if all containers seem okay
         # but the pod isn't 'Running' or 'Succeeded' yet.
         return phase
-
 
     def _format_pod_containers_status(self) -> Text:
         """Return a Text object of container status indicators for a pod."""

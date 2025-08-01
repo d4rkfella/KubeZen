@@ -10,6 +10,7 @@ from .base import (
 from kubernetes_asyncio.client import V1StorageClass
 from typing import cast
 
+
 @dataclass(frozen=True)
 class StorageClassRow(UIRow):
     """Represents a StorageClass for UI display."""
